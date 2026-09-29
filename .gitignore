@@ -1,0 +1,8 @@
+.*
+!/.gitignore
+target/
+__pycache__/
+*.iml
+/config/
+/server.properties
+/client.properties

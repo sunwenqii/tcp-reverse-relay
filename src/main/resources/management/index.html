@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101d2b">
+    <title>端口管理 · TCP Reverse Relay</title>
+    <link rel="stylesheet" href="/management/style.css">
+    <script src="/management/app.js" defer></script>
+</head>
+<body data-mode="{{MODE}}" data-setup="{{SETUP}}">
+<div class="shell">
+    <aside class="sidebar" aria-label="侧边栏">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">TR</span><span><strong>TCP Reverse Relay</strong><small>PORT MANAGEMENT</small></span>
+        </div>
+        <div class="side-label">工作空间</div>
+        <div class="side-link active"><span class="side-icon" aria-hidden="true">◫</span>端口映射<span
+                class="side-active-dot"></span></div>
+        <div class="side-bottom">
+            <div class="side-access">
+                <div><strong>允许外网访问</strong><small id="accessDescription">当前仅本机可访问</small></div>
+                <label class="switch"><input id="publicSwitch" type="checkbox" aria-label="允许外网访问管理页" disabled><span></span></label>
+            </div>
+            <div class="side-service"><span class="live-dot"></span><span>管理服务运行中</span></div>
+            <p>修改会自动保存到配置文件</p></div>
+    </aside>
+    <div class="workspace">
+        <header class="topbar">
+            <div class="breadcrumb">工作空间 <span>/</span> <strong>端口映射</strong></div>
+            <div class="top-actions"><span class="mode-chip">{{ROLE}}控制台</span><span class="top-divider"></span>
+                <button class="text-button" id="lockButton" type="button" hidden>锁定管理页</button>
+            </div>
+        </header>
+        <main class="content">
+            <div class="page-heading">
+                <div>
+                    <div class="eyebrow"><span class="eyebrow-line"></span> NETWORK CONTROL</div>
+                    <h1>端口映射</h1>
+                    <p class="page-subtitle" id="pageSubtitle">集中查看、添加和管理 TCP 转发规则。</p></div>
+                <div class="heading-actions"><span class="updated" id="updatedAt">尚未读取</span>
+                    <button class="button button-primary" id="addButton" type="button" disabled><span
+                            aria-hidden="true">＋</span> 新增映射
+                    </button>
+                </div>
+            </div>
+            <section class="summary" aria-label="运行概览">
+                <div class="stat-card"><span class="stat-icon stat-icon-blue" aria-hidden="true">▦</span><span
+                        class="stat-label">映射总数</span><strong
+                        id="totalCount">—</strong><small>已保存的转发规则</small></div>
+                <div class="stat-card"><span class="stat-icon stat-icon-green" aria-hidden="true">↗</span><span
+                        class="stat-label">已连接</span><strong
+                        id="connectedCount">—</strong><small>控制连接正常</small></div>
+                <div class="stat-card"><span class="stat-icon stat-icon-amber" aria-hidden="true">◷</span><span
+                        class="stat-label">等待连接</span><strong id="waitingCount">—</strong><small
+                        id="waitingCaption">等待客户端接入</small></div>
+                <div class="stat-card"><span class="stat-icon stat-icon-purple" aria-hidden="true">⇄</span><span
+                        class="stat-label" id="activityLabel">当前连接</span><strong id="activityCount">—</strong><small
+                        id="activityCaption">活跃的转发连接</small></div>
+            </section>
+            <section class="panel" aria-labelledby="listTitle">
+                <div class="panel-heading">
+                    <div><h2 id="listTitle">映射列表 <span id="listCount" class="list-count">0</span></h2>
+                        <p>端口变更保存后立即应用，删除会断开该映射的现有连接。</p></div>
+                    <button class="button button-quiet" id="refreshButton" type="button" disabled><span
+                            aria-hidden="true">↻</span> 刷新
+                    </button>
+                </div>
+                <div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="searchInput"
+                                                                                                   type="search"
+                                                                                                   placeholder="搜索公网端口或本地目标"
+                                                                                                   autocomplete="off"
+                                                                                                   disabled><span
+                        class="shortcut">/</span></label><select id="statusFilter" aria-label="按连接状态筛选" disabled>
+                    <option value="all">全部状态</option>
+                    <option value="connected">已连接</option>
+                    <option value="waiting">等待连接</option>
+                </select></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>公网端口</th>
+                            <th id="targetHeader">转发目标</th>
+                            <th>连接状态</th>
+                            <th id="connectionsHeader">当前连接</th>
+                            <th class="action-heading">操作</th>
+                        </tr>
+                        </thead>
+                        <tbody id="mappingRows">
+                        <tr>
+                            <td colspan="5">
+                                <div class="empty"><span class="empty-icon"
+                                                         aria-hidden="true">◫</span><strong>需要管理令牌</strong>
+                                    <p>输入令牌后即可查看和管理映射。</p></div>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="table-footer"><span id="resultSummary">尚未读取映射</span>
+                    <div class="pagination">
+                        <button id="prevButton" type="button" aria-label="上一页" disabled>‹</button>
+                        <span id="pageIndicator">—</span>
+                        <button id="nextButton" type="button" aria-label="下一页" disabled>›</button>
+                    </div>
+                </div>
+            </section>
+            <div class="hint"><span aria-hidden="true">ⓘ</span><span
+                    id="roleHint">服务端先开放公网端口，客户端再为该端口设置本地目标。</span></div>
+        </main>
+    </div>
+</div>
+<div class="gate" id="gate">
+    <div class="gate-card" role="dialog" aria-modal="true" aria-labelledby="gateTitle"><span class="gate-symbol"
+                                                                                             aria-hidden="true">TR</span>
+        <div class="gate-overline">MANAGEMENT ACCESS</div>
+        <h2 id="gateTitle">连接到管理控制台</h2>
+        <p id="gateDescription">请输入当前{{ROLE}}配置文件中的 <code>ADMIN_TOKEN</code>。密码仅保存在这个页面，刷新后需重新输入。
+        </p>
+        <form id="tokenForm"><label for="tokenInput" id="tokenLabel">管理密码</label>
+            <div class="password-wrap"><input id="tokenInput" type="password" autocomplete="off" spellcheck="false"
+                                              placeholder="输入管理密码" required>
+                <button type="button" id="showToken" aria-label="显示密码">显示</button>
+            </div>
+            <div id="confirmField" hidden><label for="confirmInput">再次输入密码</label>
+                <div class="password-wrap"><input id="confirmInput" type="password" autocomplete="new-password"
+                                                  placeholder="确认管理密码"></div>
+            </div>
+            <button class="button button-primary gate-submit" type="submit" id="connectButton">进入控制台 <span
+                    aria-hidden="true">→</span></button>
+        </form>
+        <p class="gate-error" id="gateError" role="alert"></p>
+        <div class="gate-foot"><span class="live-dot"></span><span id="gateFootText">外网访问由登录后的开关控制</span>
+        </div>
+    </div>
+</div>
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+<aside class="drawer" id="drawer" aria-labelledby="drawerTitle" aria-modal="true" role="dialog" hidden>
+    <div class="drawer-head">
+        <div><span class="drawer-kicker">FORWARD RULE</span>
+            <h2 id="drawerTitle">新增映射</h2></div>
+        <button class="icon-button" id="closeDrawer" type="button" aria-label="关闭">×</button>
+    </div>
+    <form id="mappingForm">
+        <div class="drawer-body"><p class="drawer-intro" id="drawerIntro">设置需要开放的公网端口。</p><input id="oldPort"
+                                                                                                            type="hidden"><label
+                class="field" for="remotePort"><span>公网端口 <em>必填</em></span><input id="remotePort" type="number"
+                                                                                         min="1" max="65535"
+                                                                                         placeholder="例如 18080"
+                                                                                         required><small>外部设备连接服务端时使用的端口</small></label><label
+                class="field client-only" for="targetPort"><span>本地目标端口 <em>必填</em></span>
+            <div class="input-prefix"><span>127.0.0.1 :</span><input id="targetPort" type="number" min="1" max="65535"
+                                                                     placeholder="例如 8080"></div>
+            <small>流量最终到达客户端本机的服务</small></label>
+            <div class="drawer-note"><span aria-hidden="true">ⓘ</span><span
+                    id="drawerNote">保存后立即开始监听，端口被占用时会提示错误。</span></div>
+        </div>
+        <div class="drawer-footer">
+            <button class="button button-quiet" id="cancelButton" type="button">取消</button>
+            <button class="button button-primary" id="saveButton" type="submit">保存并应用</button>
+        </div>
+    </form>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
