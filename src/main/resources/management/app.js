@@ -2,6 +2,7 @@
     'use strict';
     const $ = id => document.getElementById(id);
     const client = document.body.dataset.mode === 'client';
+    const statusText = client ? {connected: '已注册', waiting: '待注册'} : {connected: '在线', waiting: '离线'};
     let setupMode = document.body.dataset.setup === 'true';
     let token = '';
     let forwards = [];
@@ -27,8 +28,17 @@
     configureGate();
     if (client) {
         $('pageSubtitle').textContent = '管理公网端口与本机服务之间的转发关系。';
-        $('waitingCaption').textContent = '等待服务端开放端口';
+        $('connectedLabel').textContent = '已注册映射';
+        $('connectedCaption').textContent = '已与服务端建立控制连接';
+        $('waitingLabel').textContent = '待注册映射';
+        $('waitingCaption').textContent = '连接恢复后自动重试';
+        $('statusHeader').textContent = '注册状态';
+        $('statusHeader').title = '是否已向服务端注册此端口；不代表本地目标服务的健康状态';
+        $('statusFilter').setAttribute('aria-label', '按注册状态筛选');
+        $('statusFilter').querySelector('option[value="connected"]').textContent = statusText.connected;
+        $('statusFilter').querySelector('option[value="waiting"]').textContent = statusText.waiting;
         $('activityLabel').textContent = '本地目标';
+        $('activityLabel').title = '已配置本地目标端口的映射数量';
         $('activityCaption').textContent = '已设置目标的映射';
         $('targetHeader').textContent = '本地目标';
         $('roleHint').textContent = '请先在服务端开放公网端口，再在这里设置相同的端口和本机目标。断线后会自动重试。';
@@ -155,8 +165,16 @@
             const row = document.createElement('tr');
             cell(row, span(String(item.port), 'port-main')).append(span('TCP · 公网', 'port-sub'));
             cell(row, item.target != null ? '127.0.0.1 : ' + item.target : '由客户端指定', item.target == null ? 'target-muted' : 'target-main');
-            cell(row, span(item.connected ? '已连接' : '等待连接', 'status ' + (item.connected ? 'connected' : 'waiting')));
-            if (!client) cell(row, String(item.connections || 0), 'connection-count');
+            const status = span(item.connected ? statusText.connected : statusText.waiting,
+                'status ' + (item.connected ? 'connected' : 'waiting'));
+            status.title = client
+                ? (item.connected ? '已向服务端注册此端口' : '尚未完成注册，客户端会自动重试')
+                : (item.connected ? '该端口的客户端控制连接正常' : '该端口暂无客户端控制连接');
+            cell(row, status);
+            if (!client) {
+                const connections = cell(row, String(item.connections || 0), 'connection-count');
+                connections.title = '当前外部 TCP 连接数，包含等待接通的连接';
+            }
             const actions = document.createElement('div');
             actions.className = 'row-actions';
             const edit = document.createElement('button');
