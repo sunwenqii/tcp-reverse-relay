@@ -21,7 +21,7 @@
         $('confirmField').hidden = !setupMode;
         $('confirmInput').required = setupMode;
         $('gateFootText').textContent = setupMode ? '首次设置只允许在本机进行' : '外网访问由登录后的开关控制';
-        $('connectButton').firstChild.textContent = setupMode ? '保存密码并进入 ' : '进入控制台 ';
+        $('connectButton').textContent = setupMode ? '保存密码并进入' : '进入控制台';
     }
 
     configureGate();
@@ -144,9 +144,9 @@
             const box = document.createElement('div');
             box.className = 'empty';
             const title = document.createElement('strong');
-            title.textContent = token ? (forwards.length ? '没有匹配的映射' : '还没有端口映射') : '需要管理令牌';
+            title.textContent = token ? (forwards.length ? '没有匹配的映射' : '还没有端口映射') : '请先登录管理页';
             const detail = document.createElement('p');
-            detail.textContent = token ? (forwards.length ? '试试其他端口或状态。' : '点击“新增映射”开始配置。') : '输入令牌后即可查看和管理映射。';
+            detail.textContent = token ? (forwards.length ? '试试其他端口或状态。' : '点击“新增映射”开始配置。') : '登录后可查看和管理端口映射。';
             box.append(span('◫', 'empty-icon'), title, detail);
             td.append(box);
             tbody.append(row);
@@ -192,12 +192,36 @@
         $('remotePort').focus();
     }
 
+    function confirmDelete(port) {
+        return new Promise(resolve => {
+            const dialog = $('deleteDialog');
+            if (dialog.open) {
+                resolve(false);
+                return;
+            }
+            $('deletePort').textContent = String(port);
+            const listeners = new AbortController();
+            const finish = accepted => {
+                listeners.abort();
+                dialog.close();
+                resolve(accepted);
+            };
+            $('deleteCancel').addEventListener('click', () => finish(false), {signal: listeners.signal});
+            $('deleteSubmit').addEventListener('click', () => finish(true), {signal: listeners.signal});
+            dialog.addEventListener('cancel', event => {
+                event.preventDefault();
+                finish(false);
+            }, {signal: listeners.signal});
+            dialog.showModal();
+        });
+    }
+
     async function deleteForward(item) {
-        if (!confirm(`确定删除公网端口 ${item.port} 吗？该映射的现有连接会断开。`)) return;
+        if (!await confirmDelete(item.port)) return;
         try {
             await request('/api/forwards/delete', {port: item.port});
             await load(true);
-            notice(`端口 ${item.port} 已删除并保存`);
+            notice('端口 ' + item.port + ' 已删除并保存');
         } catch (error) {
             notice(error.message, true);
         }
