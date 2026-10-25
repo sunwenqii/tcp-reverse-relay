@@ -16,6 +16,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.time.ZoneId;
 import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
+import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
 
 /**
  * <p>
@@ -37,6 +38,8 @@ public final class ClientControlThread implements Runnable, IBelongControl {
     private volatile long lastAttemptAt;
     private volatile long nextRetryAt;
     private volatile long connectedAt;
+    private volatile String reportedRegistrationError = "";
+    private volatile long reportedRegistrationAt;
 
     // 存储Socket部件的映射表，键为字符串类型，值为AbsSocketPart类型的对象
     private final Map<String, AbsSocketPart> socketPartMap = new ConcurrentHashMap<>();
@@ -78,15 +81,19 @@ public final class ClientControlThread implements Runnable, IBelongControl {
             if (this.clientAdapter == null) this.clientAdapter = this.config.newCreateControlAdapter(this);
             boolean flag = this.clientAdapter.createControlChannel();
             if (cancelled) { this.stopClient(); return false; }
-            if (!flag) { lastError = "服务端未接受该端口的注册"; return false; }
+            if (!flag) { registrationFailed("服务端未接受该端口的注册"); return false; }
+            boolean reconnected = connectedAt > 0;
             connectedAt = System.currentTimeMillis();
             lastError = "";
             targetError = "";
             metadataDirty = false;
             this.start();
+            reportedRegistrationError = "";
+            RuntimeEvents.event("client", "INFO", reconnected ? "连接恢复" : "端口注册", getListenServerPort(),
+                    reconnected ? "客户端控制连接已恢复" : "端口注册成功", "服务端: " + config.getClientServiceIp() + ":" + config.getClientServicePort());
             return true;
         } catch (Exception e) {
-            lastError = TcpDiagnostics.describe(e);
+            if (!cancelled) registrationFailed(TcpDiagnostics.describe(e));
             throw e;
         } finally {
             nextRetryAt = isAlive || cancelled ? 0 : System.currentTimeMillis() + 10_000;
@@ -175,8 +182,12 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      * * 停止客户端监听
      */
     public void stopClient() {
-        if (this.isAlive && !cancelled) lastError = "控制连接已断开，等待重新注册";
+        boolean disconnected = this.isAlive && !cancelled;
         this.isAlive = false;
+        if (disconnected) {
+            lastError = "控制连接已断开，等待重新注册";
+            RuntimeEvents.event("client", "WARN", "连接断开", getListenServerPort(), lastError, "客户端将自动尝试恢复连接");
+        }
 
         Thread myThread = this.myThread;
         if (myThread != null) {
@@ -315,7 +326,19 @@ public final class ClientControlThread implements Runnable, IBelongControl {
         IClientAdapter<?, ?> adapter = clientAdapter;
         return adapter == null ? 0 : adapter.obtainServerHeartLastRecvTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
     }
-    public void recordTargetError(String error) { targetError = error; }
+    private void registrationFailed(String error) {
+        lastError = error;
+        long now = System.currentTimeMillis();
+        if (!error.equals(reportedRegistrationError) || now - reportedRegistrationAt >= 60_000) {
+            reportedRegistrationError = error; reportedRegistrationAt = now;
+            RuntimeEvents.event("client", "WARN", "注册失败", getListenServerPort(), "端口注册失败，将自动重试", error);
+        }
+    }
+    public void recordTargetError(String error) {
+        String previous = targetError; targetError = error;
+        if (!error.equals(previous)) RuntimeEvents.event("client", error.isEmpty() ? "INFO" : "WARN", "目标连接", getListenServerPort(),
+                error.isEmpty() ? "目标服务连接已恢复" : "连接目标服务失败", error);
+    }
     public int getConnectionCount() { return socketPartMap.size(); }
 
 }

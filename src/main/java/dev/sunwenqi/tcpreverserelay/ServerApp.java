@@ -5,6 +5,8 @@ import dev.sunwenqi.tcpreverserelay.config.ConfigFiles;
 import dev.sunwenqi.tcpreverserelay.config.SecurityConfig;
 import dev.sunwenqi.tcpreverserelay.management.ManagementUi;
 import dev.sunwenqi.tcpreverserelay.serverside.ServerRuntime;
+import dev.sunwenqi.tcpreverserelay.config.AdminTokenFile;
+import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
 
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
@@ -26,14 +28,20 @@ public class ServerApp {
         AppSettings.Server settings = AppSettings.server(file);
         SecurityConfig.validate(settings.mode(), settings.keys());
         ServerRuntime runtime = new ServerRuntime(file, settings);
-        try (ManagementUi ui = new ManagementUi(settings.adminPort(), false, runtime, file)) {
+        try (var events = RuntimeEvents.open(file, "server", settings.keys().aesKey(), settings.keys().tokenKey(), AdminTokenFile.resolve(file));
+             ManagementUi ui = new ManagementUi(settings.adminPort(), false, runtime, file, events.journal())) {
             try {
                 runtime.start();
                 ui.start();
+                RuntimeEvents.event("server", "INFO", "程序启动", null, "服务端已启动", "握手端口: " + settings.handshakePort());
                 System.out.println("服务端已启动，握手端口: " + settings.handshakePort());
                 new CountDownLatch(1).await();
+            } catch (Exception e) {
+                RuntimeEvents.event("server", "ERROR", "运行异常", null, "服务端运行异常", String.valueOf(e));
+                throw e;
             } finally {
                 runtime.close();
+                RuntimeEvents.event("server", "INFO", "程序停止", null, "服务端已停止", "");
             }
         }
     }

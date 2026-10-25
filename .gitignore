@@ -4,5 +4,6 @@ target/
 __pycache__/
 *.iml
 /config/
+/logs/
 /server.properties
 /client.properties

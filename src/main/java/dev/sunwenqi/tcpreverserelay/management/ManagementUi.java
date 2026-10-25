@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.sun.net.httpserver.*;
 import dev.sunwenqi.tcpreverserelay.config.*;
 import dev.sunwenqi.tcpreverserelay.forward.*;
+import dev.sunwenqi.tcpreverserelay.observability.EventJournal;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +24,7 @@ public final class ManagementUi implements AutoCloseable {
     private final ForwardManager forwards;
     private final boolean client;
     private final boolean externalPassword;
+    private final EventJournal journal;
 
     public ManagementUi(int port, boolean client, ForwardManager forwards) throws IOException {
         this(port, client, forwards, System.getenv("TCP_REVERSE_RELAY_ADMIN_TOKEN"));
@@ -33,7 +35,14 @@ public final class ManagementUi implements AutoCloseable {
     public ManagementUi(int port, boolean client, ForwardManager forwards, Path configFile) throws IOException {
         this(port, client, forwards, configFile, AdminTokenFile.resolve(configFile), AdminSettingsFile.publicAccess(configFile));
     }
+    public ManagementUi(int port, boolean client, ForwardManager forwards, Path configFile, EventJournal journal) throws IOException {
+        this(port, client, forwards, configFile, AdminTokenFile.resolve(configFile), AdminSettingsFile.publicAccess(configFile), journal);
+    }
     private ManagementUi(int port, boolean client, ForwardManager forwards, Path configFile, String token, boolean publicAccess) throws IOException {
+        this(port, client, forwards, configFile, token, publicAccess, null);
+    }
+    private ManagementUi(int port, boolean client, ForwardManager forwards, Path configFile, String token, boolean publicAccess, EventJournal journal) throws IOException {
+        this.journal = journal;
         this.token = token == null ? "" : token;
         if (!this.token.isEmpty() && (this.token.length() < 8 || this.token.length() > 128))
             throw new IllegalStateException("ADMIN_TOKEN 需为 8 至 128 个字符；留空则在首次访问时设置");
@@ -50,6 +59,8 @@ public final class ManagementUi implements AutoCloseable {
     @Override public void close() { server.stop(0); executor.shutdownNow(); }
 
     private void handle(HttpExchange exchange) throws IOException {
+        Integer operationPort = null;
+        boolean operationCompleted = false;
         try {
             boolean local = exchange.getRemoteAddress().getAddress().isLoopbackAddress();
             if (!local && (!publicAccess || token.isEmpty())) { reply(exchange, 403, "管理页外网访问已关闭"); return; }
@@ -61,9 +72,9 @@ public final class ManagementUi implements AutoCloseable {
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
             exchange.getResponseHeaders().set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'");
-            if (exchange.getRequestURI().getRawQuery() != null) { reply(exchange, 400, "URL 不支持查询参数"); return; }
             String path = exchange.getRequestURI().getPath();
-            if (path.equals("/") || path.equals("/management/style.css") || path.equals("/management/app.js")) {
+            if (exchange.getRequestURI().getRawQuery() != null && !path.equals("/api/events")) { reply(exchange, 400, "URL 不支持查询参数"); return; }
+            if (path.equals("/") || path.equals("/management/style.css") || path.equals("/management/app.js") || path.equals("/management/journal.js")) {
                 requireMethod(exchange, "GET");
                 String resource = path.equals("/") ? "/management/index.html" : path;
                 String body = resource(resource).replace("{{ROLE}}", client ? "客户端" : "服务端")
@@ -82,11 +93,14 @@ public final class ManagementUi implements AutoCloseable {
                     AdminSettingsFile.setPublicAccess(configFile, false);
                     AdminSettingsFile.setPassword(configFile, fields.get("password"));
                     token = fields.get("password"); publicAccess = false;
+                    operationCompleted = true;
+                    if (journal != null) journal.addSecret(token);
+                    record("INFO", "密码设置", null, "首次设置管理密码", "");
                 }
                 reply(exchange, 200, "管理密码已设置"); return;
             }
             if (!Set.of("/api/forwards", "/api/forwards/delete", "/api/forwards/batch", "/api/forwards/batch/preview",
-                    "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password").contains(path)) {
+                    "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password", "/api/events").contains(path)) {
                 reply(exchange, 404, "页面不存在"); return;
             }
             String supplied = exchange.getRequestHeaders().getFirst("Authorization");
@@ -94,6 +108,21 @@ public final class ManagementUi implements AutoCloseable {
                 exchange.getResponseHeaders().set("WWW-Authenticate", "Bearer"); reply(exchange, 401, "管理密码不正确或已经失效"); return;
             }
             if (path.equals("/api/forwards") && exchange.getRequestMethod().equals("GET")) { json(exchange, state()); return; }
+            if (path.equals("/api/events")) {
+                requireMethod(exchange, "GET");
+                if (journal == null) { reply(exchange, 503, "日志记录尚未初始化，请使用程序入口启动管理服务"); return; }
+                String raw = exchange.getRequestURI().getRawQuery();
+                if (raw != null && raw.length() > 4096) throw new IllegalArgumentException("筛选条件过长");
+                var filters = raw == null || raw.isEmpty() ? new HashMap<String, String>() : decodeFields(raw);
+                allowed(filters, Set.of("kind", "level", "port", "q", "from", "to", "before", "limit"));
+                Integer selectedPort = filters.getOrDefault("port", "").isBlank() ? null : AppSettings.parsePort(filters.get("port"), "端口");
+                long limit = number(filters, "limit", 50);
+                if (limit < 1 || limit > 100) throw new IllegalArgumentException("limit 需为 1 至 100");
+                var filter = new EventJournal.Filter(filters.getOrDefault("kind", "event"), filters.getOrDefault("level", "all"), selectedPort,
+                        filters.getOrDefault("q", ""), number(filters, "from", 0), number(filters, "to", 0), number(filters, "before", 0),
+                        (int) limit);
+                json(exchange, journal.query(filter)); return;
+            }
             if (path.equals("/api/clients")) {
                 requireMethod(exchange, "GET");
                 if (client) { reply(exchange, 404, "客户端清单仅在服务端提供"); return; }
@@ -115,21 +144,36 @@ public final class ManagementUi implements AutoCloseable {
                 case "/api/forwards" -> {
                     allowed(fields, client ? Set.of("oldPort", "port", "target", "targetHost") : Set.of("oldPort", "port"));
                     Integer old = fields.getOrDefault("oldPort", "").isBlank() ? null : AppSettings.parsePort(fields.get("oldPort"), "oldPort");
-                    forwards.upsert(old, AppSettings.parsePort(fields.get("port"), "port"), client ? fields.getOrDefault("targetHost", "127.0.0.1") : null,
+                    operationPort = AppSettings.parsePort(fields.get("port"), "port");
+                    forwards.upsert(old, operationPort, client ? fields.getOrDefault("targetHost", "127.0.0.1") : null,
                             client ? AppSettings.parsePort(fields.get("target"), "target") : null);
+                    operationCompleted = true;
+                    record("INFO", "映射配置", operationPort, old == null ? "新增端口映射" : "修改端口映射",
+                            (old == null ? "" : "原公网端口: " + old + "；") + (client ? "目标: " + fields.getOrDefault("targetHost", "127.0.0.1") + ":" + fields.get("target") : "服务端开放公网端口"));
                     json(exchange, mutationState());
                 }
                 case "/api/forwards/delete" -> {
-                    exact(fields, "port"); forwards.delete(AppSettings.parsePort(fields.get("port"), "port")); json(exchange, mutationState());
+                    exact(fields, "port"); operationPort = AppSettings.parsePort(fields.get("port"), "port");
+                    forwards.delete(operationPort); operationCompleted = true;
+                    record("INFO", "映射配置", operationPort, "删除端口映射", "该映射的现有连接已关闭"); json(exchange, mutationState());
                 }
                 case "/api/forwards/batch", "/api/forwards/batch/preview" -> {
                     exact(fields, "action", "entries");
                     var result = forwards.batch(fields.get("action"), fields.get("entries"), path.endsWith("/preview"));
+                    operationCompleted = !result.preview();
+                    if (!result.preview() && journal != null) {
+                        String action = switch (result.action()) { case "add" -> "添加"; case "enable" -> "启用"; case "disable" -> "暂停"; default -> "删除"; };
+                        journal.append("event", "INFO", "批量配置", result.ports().size() == 1 ? result.ports().get(0) : null, result.ports(),
+                                action + " " + result.ports().size() + " 个映射", result.message(), "management");
+                    }
                     json(exchange, Map.of("action", result.action(), "preview", result.preview(), "ports", result.ports(), "count", result.ports().size(),
                             "connections", result.connections(), "message", result.message()));
                 }
                 case "/api/forwards/diagnose" -> {
                     exact(fields, "port"); var result = forwards.diagnose(AppSettings.parsePort(fields.get("port"), "port"));
+                    boolean failed = result.checks().stream().anyMatch(check -> check.status().equals("failed"));
+                    record(failed ? "WARN" : "INFO", "映射诊断", result.port(), failed ? "诊断发现连接异常" : "映射诊断已完成",
+                            String.join("\n", result.checks().stream().map(check -> check.name() + "：" + check.status() + " · " + check.detail()).toList()));
                     json(exchange, Map.of("port", result.port(), "checkedAt", result.checkedAt(), "note", result.note(),
                             "checks", result.checks().stream().map(check -> Map.of("name", check.name(), "status", check.status(),
                                     "detail", check.detail(), "durationMs", check.durationMs())).toList()));
@@ -139,6 +183,8 @@ public final class ManagementUi implements AutoCloseable {
                     if (!Set.of("true", "false").contains(fields.get("public"))) throw new IllegalArgumentException("public 只能是 true 或 false");
                     boolean enabled = Boolean.parseBoolean(fields.get("public"));
                     AdminSettingsFile.setPublicAccess(configFile, enabled); publicAccess = enabled;
+                    operationCompleted = true;
+                    record("INFO", "访问设置", null, enabled ? "开启管理页外网访问" : "关闭管理页外网访问", "");
                     json(exchange, Map.of("message", enabled ? "外网访问已开启" : "外网访问已关闭"));
                 }
                 case "/api/password" -> {
@@ -147,16 +193,35 @@ public final class ManagementUi implements AutoCloseable {
                     synchronized (this) {
                         if (!equal(token, fields.get("currentPassword"))) { reply(exchange, 401, "当前密码不正确"); return; }
                         AdminSettingsFile.changePassword(configFile, token, fields.get("newPassword")); token = fields.get("newPassword");
+                        operationCompleted = true;
+                        if (journal != null) journal.addSecret(token);
+                        record("INFO", "密码修改", null, "管理密码已修改", "旧密码已失效，所有页面需重新登录");
                     }
                     json(exchange, Map.of("message", "密码已修改，请重新登录"));
                 }
                 default -> throw new IllegalArgumentException("不支持的操作");
             }
         } catch (MethodNotAllowed e) { exchange.getResponseHeaders().set("Allow", e.method); reply(exchange, 405, "请求方法不支持");
-        } catch (IllegalArgumentException e) { reply(exchange, 400, e.getMessage());
-        } catch (IOException | IllegalStateException e) { reply(exchange, 409, e.getMessage());
-        } catch (Exception e) { reply(exchange, 500, "操作失败，请查看程序日志");
+        } catch (IllegalArgumentException | ArithmeticException e) { recordFailure(exchange, operationPort, operationCompleted, e); reply(exchange, 400, e.getMessage());
+        } catch (IOException | IllegalStateException e) { recordFailure(exchange, operationPort, operationCompleted, e); reply(exchange, 409, e.getMessage());
+        } catch (Exception e) { recordFailure(exchange, operationPort, operationCompleted, e); reply(exchange, 500, "操作失败，请查看程序日志");
         } finally { exchange.close(); }
+    }
+
+    private void record(String level, String category, Integer selectedPort, String message, String detail) {
+        if (journal != null) journal.append("event", level, category, selectedPort, List.of(), message, detail, "management");
+    }
+    private void recordFailure(HttpExchange exchange, Integer selectedPort, boolean completed, Exception error) {
+        String path = exchange.getRequestURI().getPath();
+        if (exchange.getRequestMethod().equals("POST") && !path.equals("/api/events") && !path.endsWith("/preview")
+                && !token.isEmpty() && equal("Bearer " + token, exchange.getRequestHeaders().getFirst("Authorization")))
+            record("WARN", completed ? "响应异常" : "操作失败", selectedPort,
+                    completed ? "配置已应用，管理响应未完成" : "管理操作未完成", path + " · " + error.getMessage());
+    }
+    private static long number(Map<String, String> fields, String key, long fallback) {
+        if (!fields.containsKey(key)) return fallback;
+        try { return Long.parseLong(fields.get(key)); }
+        catch (NumberFormatException e) { throw new IllegalArgumentException(key + " 必须是有效整数"); }
     }
 
     private Map<String, Object> mutationState() {
@@ -193,8 +258,11 @@ public final class ManagementUi implements AutoCloseable {
         if (type == null || !type.toLowerCase(Locale.ROOT).startsWith("application/x-www-form-urlencoded")) throw new IllegalArgumentException("需要表单格式的请求内容");
         byte[] bytes = exchange.getRequestBody().readNBytes(limit + 1);
         if (bytes.length > limit) throw new IllegalArgumentException("请求内容过大");
+        return decodeFields(new String(bytes, StandardCharsets.UTF_8));
+    }
+    private static HashMap<String, String> decodeFields(String encoded) {
         var fields = new HashMap<String, String>();
-        for (String part : new String(bytes, StandardCharsets.UTF_8).split("&")) {
+        for (String part : encoded.split("&")) {
             String[] pair = part.split("=", 2);
             if (pair.length != 2) throw new IllegalArgumentException("无效表单");
             String key = URLDecoder.decode(pair[0], StandardCharsets.UTF_8), value = URLDecoder.decode(pair[1], StandardCharsets.UTF_8);

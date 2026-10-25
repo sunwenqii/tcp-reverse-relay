@@ -7,6 +7,7 @@
     let stale = false, lastSuccess = 0, generation = 0, loading = null, canChangePassword = false;
     let toastTimer, batchAction = 'add', previewKey = '', diagnosticPort = null, diagnosticGeneration = 0, finishConfirmation = null;
     const selected = new Set(), busy = new Set();
+    const journalUI = window.RelayJournal.create({request, handleError, element, cell, clock, loggedIn: () => Boolean(token)});
 
     function element(tag, text = '', className = '') {
         const node = document.createElement(tag);
@@ -29,10 +30,10 @@
             $(id).disabled = !writable() || busy.has(id);
         $('applyBatch').disabled = !writable() || busy.has('applyBatch') || !previewKey || previewKey !== batchAction + '\n' + $('batchEntries').value;
         for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).disabled = !token || Boolean(loading);
-        for (const id of ['searchInput', 'statusFilter', 'selectPage', 'showClients']) $(id).disabled = !token;
+        for (const id of ['searchInput', 'statusFilter', 'selectPage', 'showClients', 'showEvents']) $(id).disabled = !token;
         $('passwordButton').disabled = !writable() || !canChangePassword;
         $('passwordButton').title = canChangePassword ? '' : '当前实例的管理密码由外部配置提供';
-        document.querySelectorAll('.row-actions button').forEach(button => { button.disabled = !writable(); });
+        document.querySelectorAll('#mappingRows .row-actions button').forEach(button => { button.disabled = !writable(); });
     }
     function configureGate() {
         $('gateTitle').textContent = setupMode ? '首次设置管理密码' : '登录管理控制台';
@@ -196,7 +197,7 @@
             if (!client) { const count = cell(row, String(item.connections || 0), 'connection-count'); count.title = '含等待接通的外部 TCP 连接'; }
             const actions = element('div', '', 'row-actions');
             for (const [text, action, css] of [
-                ['诊断', () => openDiagnostic(item.port), ''], ['编辑', () => openDrawer(item), 'write-action'],
+                ['诊断', () => openDiagnostic(item.port), ''], ['日志', () => { showView('events'); journalUI.forPort(item.port); }, ''], ['编辑', () => openDrawer(item), 'write-action'],
                 [item.enabled === false ? '启用' : '暂停', () => openBatch(item.enabled === false ? 'enable' : 'disable', [item.port]), 'write-action'],
                 ['删除', () => deleteForward(item), 'delete write-action']]) {
                 const button = element('button', text, css); button.type = 'button'; button.disabled = !writable();
@@ -232,9 +233,10 @@
     function showView(next) {
         view = next;
         $('mappingView').hidden = view !== 'mappings'; $('mappingActions').hidden = view !== 'mappings'; $('clientsView').hidden = view !== 'clients';
-        $('pageTitle').textContent = view === 'clients' ? '客户端' : '端口映射';
-        $('pageSubtitle').textContent = view === 'clients' ? '查看客户端身份、接入来源和端口注册情况。' : client ? '管理公网端口与目标服务之间的转发关系。' : '管理服务端开放的公网 TCP 端口。';
-        for (const [id, name] of [['showMappings', 'mappings'], ['showClients', 'clients']]) {
+        $('eventsView').hidden = view !== 'events'; journalUI.activate(view === 'events');
+        $('pageTitle').textContent = view === 'events' ? '运行日志' : view === 'clients' ? '客户端' : '端口映射';
+        $('pageSubtitle').textContent = view === 'events' ? '追踪连接变化、配置操作与程序异常。' : view === 'clients' ? '查看客户端身份、接入来源和端口注册情况。' : client ? '管理公网端口与目标服务之间的转发关系。' : '管理服务端开放的公网 TCP 端口。';
+        for (const [id, name] of [['showMappings', 'mappings'], ['showClients', 'clients'], ['showEvents', 'events']]) {
             $(id).classList.toggle('active', view === name);
             if (view === name) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
         }
@@ -325,6 +327,7 @@
     function lock() {
         diagnosticGeneration++;
         token = ''; generation++; loading = null; stale = false; forwards = []; clients = []; selected.clear();
+        journalUI.reset();
         $('gate').hidden = false; $('lockButton').hidden = true; $('passwordButton').hidden = true;
         $('tokenInput').value = ''; $('confirmInput').value = ''; $('connectionBanner').hidden = true;
         $('mainContent').classList.remove('stale'); closeDrawer();
@@ -354,6 +357,7 @@
     $('batchButton').addEventListener('click', () => openBatch('add'));
     $('showMappings').addEventListener('click', () => showView('mappings'));
     $('showClients').addEventListener('click', () => showView('clients'));
+    $('showEvents').addEventListener('click', () => showView('events'));
     for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).addEventListener('click', () => load(false).catch(() => {}));
     for (const id of ['searchInput', 'statusFilter']) $(id).addEventListener(id === 'searchInput' ? 'input' : 'change', () => { page = 1; render(); });
     $('prevButton').addEventListener('click', () => { page--; render(); }); $('nextButton').addEventListener('click', () => { page++; render(); });

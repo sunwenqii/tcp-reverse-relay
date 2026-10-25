@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
 import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
+import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
 
 /**
  * <p>
@@ -252,7 +253,10 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
      */
     private synchronized void stopListen() {
         log.info("stopListen[{}]", this.getListenPort());
+        boolean disconnected = this.isAlive && !canceled;
         this.isAlive = false;
+        if (disconnected) RuntimeEvents.event("server", "WARN", "客户端离线", getListenPort(), "客户端控制连接已断开",
+                registration == null ? "" : registration.name() + " · " + registration.address());
 
         NioHallows.release(this.listenServerSocket.getChannel());
 
@@ -424,6 +428,8 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
         this.controlSocket = controlSocketNew;
         controlSocketNew.startRecv();
         this.start();
+        RuntimeEvents.event("server", "INFO", "客户端接入", getListenPort(), "客户端已注册此端口",
+                nextRegistration.name() + " · " + nextRegistration.address());
     }
 
     @Override

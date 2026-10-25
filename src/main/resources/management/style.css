@@ -206,8 +206,39 @@ input[type="checkbox"] { accent-color: #2459c5; }
 .check-state.failed { color: #b44146; background: #fdefef; }
 .check-state.pending { color: #9b6b29; background: #fff6e9; }
 .password-dialog { width: min(450px, calc(100vw - 32px)); }
+.events-panel { margin-top: 24px; }
+.events-tabs { display: flex; align-items: center; gap: 4px; padding: 0 25px 18px; }
+.segment-button { padding: 7px 12px; border: 1px solid transparent; border-radius: 5px; color: #728094; background: transparent; font-size: 12px; }
+.segment-button.active { border-color: #dce6f5; background: #eff4fc; color: #2459c5; font-weight: 650; }
+.auto-refresh { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #788697; font-size: 11px; }
+.events-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 25px 20px; }
+.events-toolbar .search { flex: 1 1 220px; }
+.events-toolbar select, .port-filter { height: 36px; padding: 0 10px; border: 1px solid #dce3ea; border-radius: 6px; color: #526275; background: #fff; font-size: 12px; }
+.port-filter { width: 110px; }
+.journal-warning { margin: 0 25px 18px; padding: 10px 13px; border: 1px solid #eddbb8; border-radius: 5px; background: #fff9ed; color: #966c29; font-size: 12px; line-height: 1.6; }
+.journal-error { margin: 0 25px 18px; color: #b44146; font-size: 12px; }
+.events-table { table-layout: fixed; min-width: 850px; }
+.events-table th:nth-child(1) { width: 195px; }
+.events-table th:nth-child(2) { width: 90px; }
+.events-table th:nth-child(3) { width: 105px; }
+.events-table th:last-child { width: 100px; }
+.events-table .row-actions button { white-space: nowrap; }
+.event-time { color: #8190a0; font-size: 11px; white-space: nowrap; }
+.event-port { font-variant-numeric: tabular-nums; }
+.event-message span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #34475d; }
+.event-message small { display: block; overflow: hidden; text-overflow: ellipsis; margin-top: 5px; color: #9aa5b2; font-size: 10px; white-space: nowrap; }
+.log-level { display: inline-block; padding: 3px 7px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.log-level.info { background: #edf3fb; color: #54749d; }
+.log-level.warn { background: #fff5e4; color: #a07935; }
+.log-level.error { background: #fdefef; color: #b44146; }
+.journal-pagination { display: flex; align-items: center; gap: 10px; }
+.journal-pagination .button { min-height: 28px; padding: 0 9px; font-size: 11px; }
+.journal-note { margin: 15px 0 0; color: #8b98a7; font-size: 11px; line-height: 1.7; }
+.log-detail-dialog { width: min(780px, calc(100vw - 32px)); }
+.event-detail-message { color: #34475d; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.event-detail-text { max-height: 45vh; overflow: auto; padding: 15px; border: 1px solid #e7ebf0; border-radius: 5px; background: #f8fafc; color: #617185; font: 12px/1.8 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-@media (max-width: 1050px) {
+@media (max-width: 1180px) {
     .top-nav { margin-left: 26px; }
     .content { padding: 34px 28px 55px; }
     .topbar { padding: 0 24px; flex-wrap: wrap; gap: 0; }
@@ -263,6 +294,20 @@ input[type="checkbox"] { accent-color: #2459c5; }
     .selection-bar > div { gap: 18px; }
     .connection-banner { align-items: flex-start; }
     .wide-dialog { padding: 22px; }
+    .topbar-main { height: auto; flex-wrap: wrap; }
+    .brand { width: 100%; height: 52px; }
+    .top-nav { height: 38px; margin-left: 0; }
+    .top-nav-link + .top-nav-link { margin-left: 18px; }
+    .events-tabs, .events-toolbar { padding-left: 16px; padding-right: 16px; }
+    .events-toolbar { gap: 8px; }
+    .events-toolbar .search { flex-basis: 100%; }
+    .events-toolbar select { flex: 1 1 110px; min-width: 110px; }
+    .events-toolbar .port-filter { flex: 1 1 90px; width: auto; min-width: 90px; }
+    .events-toolbar .button { min-width: 60px; }
+    .events-toolbar .text-button { padding: 6px 8px; }
+    .events-panel .table-footer { height: auto; min-height: 60px; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
+    .journal-pagination { margin-left: auto; gap: 8px; }
+    .journal-warning, .journal-error { margin-left: 16px; margin-right: 16px; }
 }
 @media (max-width: 420px) {
     .page-heading { flex-wrap: wrap; }

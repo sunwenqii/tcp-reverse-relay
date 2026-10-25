@@ -6,6 +6,7 @@ import dev.sunwenqi.tcpreverserelay.executor.*;
 import dev.sunwenqi.tcpreverserelay.nio.NioHallows;
 import dev.sunwenqi.tcpreverserelay.serverside.ServerRuntime;
 import dev.sunwenqi.tcpreverserelay.management.ManagementUi;
+import dev.sunwenqi.tcpreverserelay.observability.*;
 import com.alibaba.fastjson.JSON;
 import java.net.http.*;
 import org.junit.jupiter.api.*;
@@ -43,13 +44,14 @@ class ManagementFeaturesIntegrationTest {
                     + "\nclient.id=test-client\nclient.name=Office PC\nforwards=" + port + ":localhost:" + target.getLocalPort() + "\n" + keys);
             var server = new ServerRuntime(serverFile, AppSettings.server(serverFile));
             var client = new ClientRuntime(clientFile, AppSettings.client(clientFile));
-            try {
+            try (var serverEvents = RuntimeEvents.open(serverFile, "server", "test-pass-123");
+                 var clientEvents = RuntimeEvents.open(clientFile, "client", "test-pass-123")) {
                 server.start(); client.start();
                 await(() -> client.list().get(0).connected() && server.list().get(0).connected(), 5000);
                 var info = server.clients().get(0);
                 assertEquals("test-client", info.id()); assertEquals("Office PC", info.name());
                 assertEquals("localhost", info.mappings().get(0).targetHost());
-                assertEquals("1.1.0", info.version());
+                assertEquals("1.2.0", info.version());
                 try (var ui = new ManagementUi(admin, false, server, serverFile)) {
                     ui.start();
                     var http = HttpClient.newHttpClient();
@@ -87,6 +89,9 @@ class ManagementFeaturesIntegrationTest {
                 assertFalse(server.clients().get(0).online());
                 server.batch("enable", Integer.toString(port), false);
                 await(() -> server.list().get(0).connected(), 15000);
+                var filter = new EventJournal.Filter("event", "all", port, "", 0, 0, 0, 100);
+                assertTrue(JSON.toJSONString(serverEvents.journal().query(filter)).contains("客户端控制连接已断开"));
+                assertTrue(JSON.toJSONString(clientEvents.journal().query(filter)).contains("客户端控制连接已恢复"));
             } finally {
                 client.close(); server.close(); NioHallows.INSTANCE.cancel(); RelayExecutor.resetExecutor(new SimpleExecutor());
             }

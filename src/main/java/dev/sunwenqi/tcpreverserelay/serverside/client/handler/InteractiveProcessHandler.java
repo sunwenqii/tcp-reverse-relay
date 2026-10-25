@@ -36,7 +36,7 @@ public class InteractiveProcessHandler implements IPassValueHandler<InteractiveM
     public PassValueNextEnum proc(SocketChannel<? extends InteractiveModel, ? super InteractiveModel> socketChannel,
                                   Optional<? extends InteractiveModel> optional) {
         InteractiveModel value = optional.getValue();
-        log.info("接收到新消息：[ {} ]", value);
+        log.debug("接收到新消息：[ {} ]", value);
 
         for (IProcess process : this.processList) {
             boolean wouldProc = process.wouldProc(value);

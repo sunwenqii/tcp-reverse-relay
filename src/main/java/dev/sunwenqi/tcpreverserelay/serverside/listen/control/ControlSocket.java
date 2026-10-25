@@ -157,7 +157,7 @@ public class ControlSocket implements IControlSocket, Runnable {
                     continue;
                 }
 
-                log.info("监听线程 [{}] 接收到控制端口发来的消息：[ {} ]", this.formatServerListenInfo(),
+                log.debug("监听线程 [{}] 接收到控制端口发来的消息：[ {} ]", this.formatServerListenInfo(),
                         interactiveModel);
 
                 boolean proc = false;
@@ -169,7 +169,7 @@ public class ControlSocket implements IControlSocket, Runnable {
                 }
 
                 if (!proc) {
-                    log.warn("无处理方法的信息：[{}]", interactiveModel);
+                    log.warn("端口 {} 收到未支持的控制消息类型: {}", this.formatServerListenInfo(), interactiveModel.getInteractiveType());
 
                     InteractiveModel result = InteractiveModel.of(interactiveModel.getInteractiveSeq(),
                             InteractiveTypeEnum.COMMON_REPLY,
@@ -178,7 +178,9 @@ public class ControlSocket implements IControlSocket, Runnable {
                 }
 
             } catch (Exception e) {
-                log.error("读取或写入异常", e);
+                if (this.cancelled || !this.started) break;
+                if (e instanceof IOException) log.warn("端口 {} 控制连接已断开: {}", this.formatServerListenInfo(), e.getMessage());
+                else log.error("端口 " + this.formatServerListenInfo() + " 控制消息处理失败", e);
                 if (e instanceof IOException || !this.isValid()) {
                     this.close();
                 }

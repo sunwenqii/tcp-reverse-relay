@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#f7f8fa">
     <title>端口映射 · TCP Reverse Relay</title>
     <link rel="stylesheet" href="/management/style.css">
+    <script src="/management/journal.js" defer></script>
     <script src="/management/app.js" defer></script>
 </head>
 <body data-mode="{{MODE}}" data-setup="{{SETUP}}">
@@ -16,7 +17,7 @@
                 <svg class="brand-icon" viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M3 8h21m-5-5 5 5-5 5M25 20H4m5-5-5 5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span class="product-name"><strong>TCP</strong> Reverse Relay</span>
             </div>
-            <nav class="top-nav" aria-label="管理导航"><button class="top-nav-link active" id="showMappings" type="button" aria-current="page">端口映射</button><button class="top-nav-link server-only" id="showClients" type="button" disabled>客户端</button></nav>
+            <nav class="top-nav" aria-label="管理导航"><button class="top-nav-link active" id="showMappings" type="button" aria-current="page">端口映射</button><button class="top-nav-link server-only" id="showClients" type="button" disabled>客户端</button><button class="top-nav-link" id="showEvents" type="button" disabled>运行日志</button></nav>
         </div>
         <div class="top-actions">
             <div class="access-control"><div class="access-label"><strong>外网访问</strong><small id="accessDescription">当前仅本机可访问</small></div><label class="switch"><input id="publicSwitch" type="checkbox" aria-label="允许外网访问管理页" disabled><span aria-hidden="true"></span></label></div>
@@ -46,6 +47,16 @@
             <div class="hint"><strong>客户端记录</strong><span>客户端标识保存在各自配置中；清单保留本次服务运行期间的记录，重启后由客户端重新注册恢复。</span></div>
             <section class="panel clients-panel"><div class="panel-heading"><div><h2>客户端清单 <span id="clientCount" class="list-count">0</span></h2><p>同一客户端的多个端口合并展示，客户端名称和目标地址由客户端上报。</p></div><button class="button button-quiet" id="refreshClients" type="button">刷新</button></div><div class="table-wrap"><table><thead><tr><th>客户端</th><th>连接来源</th><th>状态</th><th>映射</th><th>最近通信</th><th class="action-heading">操作</th></tr></thead><tbody id="clientRows"></tbody></table></div></section>
         </section>
+        <section id="eventsView" hidden>
+            <section class="panel events-panel" aria-labelledby="eventsTitle">
+                <div class="panel-heading"><div><h2 id="eventsTitle">运行记录</h2><p>查看连接变化和配置操作，或切换到程序日志排查异常。</p></div><span class="updated" id="eventsUpdated">尚未读取</span></div>
+                <div class="events-tabs" role="group" aria-label="记录类型"><button type="button" class="segment-button active" id="eventKindEvents" aria-pressed="true">运行事件</button><button type="button" class="segment-button" id="eventKindLogs" aria-pressed="false">程序日志</button><label class="auto-refresh"><input id="eventsAuto" type="checkbox" checked>自动刷新</label></div>
+                <form class="events-toolbar" id="eventFilters"><label class="search"><span class="search-icon" aria-hidden="true">⌕</span><input id="eventKeyword" type="search" maxlength="200" placeholder="搜索事件、错误或异常详情" aria-label="搜索日志关键词"></label><input class="port-filter" id="eventPort" type="number" min="1" max="65535" placeholder="全部端口" aria-label="按公网端口筛选"><select id="eventLevel" aria-label="按日志级别筛选"><option value="all">全部级别</option><option value="INFO">信息</option><option value="WARN">警告</option><option value="ERROR">错误</option></select><select id="eventRange" aria-label="按时间筛选"><option value="1">最近 1 小时</option><option value="24" selected>最近 24 小时</option><option value="168">最近 7 天</option></select><button class="button button-quiet" type="submit" id="eventSearch">查询</button><button class="text-button" type="button" id="eventReset">重置</button></form>
+                <div class="journal-warning" id="journalWarning" role="status" hidden></div><p class="journal-error" id="journalError" role="alert" hidden></p>
+                <div class="table-wrap"><table class="events-table"><thead><tr><th>时间</th><th>级别</th><th>公网端口</th><th id="eventMessageHeader">运行事件</th><th class="action-heading">操作</th></tr></thead><tbody id="eventRows"><tr><td colspan="5"><div class="empty"><strong>尚未读取运行记录</strong></div></td></tr></tbody></table></div>
+                <div class="table-footer"><span id="eventSummary">尚未读取</span><div class="journal-pagination"><button class="text-button" id="eventLatest" type="button">最新记录</button><button class="button button-quiet" id="eventPrevious" type="button" disabled>上一页</button><button class="button button-quiet" id="eventOlder" type="button" disabled>更早记录</button></div></div>
+            </section><p class="journal-note" id="journalNote">记录自动保存到运行目录的 logs 文件夹，重启后仍可查看。最多保留 7 天，文件按大小轮换；页面展示最近保留的记录。</p>
+        </section>
     </main>
 </div></div>
 
@@ -69,5 +80,6 @@
 <dialog class="wide-dialog" id="batchDialog" aria-labelledby="batchTitle"><div class="modal-heading"><div><h2 id="batchTitle">批量添加</h2><p id="batchHint"></p></div><button class="icon-button" data-close="batchDialog" type="button" aria-label="关闭">×</button></div><form id="batchForm"><label class="field" for="batchEntries"><span id="batchEntriesLabel">端口配置</span><textarea id="batchEntries" rows="5" maxlength="200000" required></textarea></label><div class="batch-preview" id="batchPreview" hidden></div><p class="form-error" id="batchError" role="alert"></p><div class="dialog-actions"><button class="button button-quiet" data-close="batchDialog" type="button">取消</button><button class="button button-quiet" id="previewBatch" type="button">校验并预览</button><button class="button button-primary write-action" id="applyBatch" type="button" disabled>应用配置</button></div></form></dialog>
 
 <dialog class="wide-dialog password-dialog" id="passwordDialog" aria-labelledby="passwordTitle"><div class="modal-heading"><div><h2 id="passwordTitle">修改管理密码</h2><p>修改后所有已登录页面都需要重新登录。</p></div><button class="icon-button" data-close="passwordDialog" type="button" aria-label="关闭">×</button></div><form id="passwordForm"><label class="field" for="currentPassword"><span>当前密码</span><input id="currentPassword" type="password" autocomplete="current-password" maxlength="128" required></label><label class="field" for="newPassword"><span>新密码</span><input id="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required><small>8 至 128 个字符</small></label><label class="field" for="confirmPassword"><span>确认新密码</span><input id="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label><p class="form-error" id="passwordError" role="alert"></p><div class="dialog-actions"><button class="button button-quiet" data-close="passwordDialog" type="button">取消</button><button class="button button-primary write-action" id="savePassword" type="submit">修改密码</button></div></form></dialog>
+<dialog class="wide-dialog log-detail-dialog" id="eventDetailDialog" aria-labelledby="eventDetailTitle"><div class="modal-heading"><div><h2 id="eventDetailTitle">记录详情</h2><p id="eventDetailMeta"></p></div><button class="icon-button" data-close="eventDetailDialog" type="button" aria-label="关闭">×</button></div><p class="event-detail-message" id="eventDetailMessage"></p><pre class="event-detail-text" id="eventDetailText"></pre><p class="modal-note" id="eventCopyHint"></p><div class="dialog-actions"><button class="button button-quiet" data-close="eventDetailDialog" type="button">关闭</button><button class="button button-primary" id="eventCopy" type="button">复制详情</button></div></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body></html>

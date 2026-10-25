@@ -11,9 +11,12 @@
         </encoder>
     </appender>
 
+    <appender name="journalLog" class="dev.sunwenqi.tcpreverserelay.observability.JournalLogAppender"/>
+
     <root level="INFO">
         <appender-ref ref="consoleLog"/>
+        <appender-ref ref="journalLog"/>
     </root>
 
-    <logger level="INFO" name="com.sunwenqi"/>
+    <logger level="INFO" name="dev.sunwenqi.tcpreverserelay"/>
 </configuration>

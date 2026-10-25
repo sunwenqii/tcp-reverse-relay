@@ -137,7 +137,8 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
         try {
             destSocket = this.newDestSocket();
         } catch (Exception e) {
-            log.error("向目标建立连接失败 {}:{}", this.config.getDestIp(), this.config.getDestPort());
+            log.error("端口 {} 连接目标 {}:{} 失败: {}", this.config.getListenServerPort(),
+                    this.config.getDestIp(), this.config.getDestPort(), TcpDiagnostics.describe(e));
             this.clientControlThread.recordTargetError(TcpDiagnostics.describe(e));
             return false;
         }
@@ -271,7 +272,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
         ClientControlModel info = new ClientControlModel(this.config.getListenServerPort());
         info.setClientId(this.config.getClientId());
         info.setClientName(this.config.getClientName());
-        info.setClientVersion("1.1.0");
+        info.setClientVersion("1.2.0");
         info.setProtocolVersion(2);
         synchronized (this.config) {
             info.setTargetHost(this.config.getDestIp());
