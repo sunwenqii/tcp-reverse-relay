@@ -86,9 +86,14 @@ public class SimpleListenServerConfig implements IListenServerConfig {
             ServerSocketChannel openServerSocketChannel = SelectorProvider.provider().openServerSocketChannel();
             // Permit prompt rebinding where the OS allows it. A port can still
             // remain unavailable briefly after active TCP traffic is closed.
-            openServerSocketChannel.socket().setReuseAddress(true);
-            openServerSocketChannel.bind(new InetSocketAddress(this.getListenPort()));
-            return openServerSocketChannel.socket();
+            try {
+                openServerSocketChannel.socket().setReuseAddress(true);
+                openServerSocketChannel.bind(new InetSocketAddress(this.getListenPort()));
+                return openServerSocketChannel.socket();
+            } catch (Exception e) {
+                openServerSocketChannel.close();
+                throw e;
+            }
         } else {
             return this.createServerSocket.createServerSocket(this.getListenPort());
         }

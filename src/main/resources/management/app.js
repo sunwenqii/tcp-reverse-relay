@@ -2,363 +2,412 @@
     'use strict';
     const $ = id => document.getElementById(id);
     const client = document.body.dataset.mode === 'client';
-    const statusText = client ? {connected: '已注册', waiting: '待注册'} : {connected: '在线', waiting: '离线'};
     let setupMode = document.body.dataset.setup === 'true';
-    let token = '';
-    let forwards = [];
-    let page = 1;
-    let toastTimer;
+    let token = '', forwards = [], clients = [], page = 1, view = 'mappings';
+    let stale = false, lastSuccess = 0, generation = 0, loading = null, canChangePassword = false;
+    let toastTimer, batchAction = 'add', previewKey = '', diagnosticPort = null, diagnosticGeneration = 0, finishConfirmation = null;
+    const selected = new Set(), busy = new Set();
 
+    function element(tag, text = '', className = '') {
+        const node = document.createElement(tag);
+        node.textContent = text;
+        node.className = className;
+        return node;
+    }
+    function cell(row, value, className = '') {
+        const node = element('td', '', className);
+        if (value instanceof Node) node.append(value); else node.textContent = value;
+        row.append(node); return node;
+    }
+    function clock(time) { return time ? new Date(time).toLocaleString('zh-CN', {hour12: false}) : '—'; }
+    function address(host, port) { return (host.includes(':') ? '[' + host + ']' : host) + ':' + port; }
+    function message(result, fallback) { return result && typeof result === 'object' ? result.message || fallback : result || fallback; }
+    function writable() { return Boolean(token) && !stale; }
+    function setBusy(id, enabled) { enabled ? busy.add(id) : busy.delete(id); syncControls(); }
+    function syncControls() {
+        for (const id of ['addButton', 'batchButton', 'publicSwitch', 'enableSelected', 'disableSelected', 'deleteSelected', 'saveButton', 'savePassword'])
+            $(id).disabled = !writable() || busy.has(id);
+        $('applyBatch').disabled = !writable() || busy.has('applyBatch') || !previewKey || previewKey !== batchAction + '\n' + $('batchEntries').value;
+        for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).disabled = !token || Boolean(loading);
+        for (const id of ['searchInput', 'statusFilter', 'selectPage', 'showClients']) $(id).disabled = !token;
+        $('passwordButton').disabled = !writable() || !canChangePassword;
+        $('passwordButton').title = canChangePassword ? '' : '当前实例的管理密码由外部配置提供';
+        document.querySelectorAll('.row-actions button').forEach(button => { button.disabled = !writable(); });
+    }
     function configureGate() {
-        $('gateTitle').textContent = setupMode ? '首次设置管理密码' : '连接到管理控制台';
-        $('gateDescription').textContent = setupMode
-            ? '为当前设备设置 8 至 128 位管理密码。首次设置只能在本机完成，保存后即可进入控制台。'
-            : '请输入当前设备的管理密码。密码仅保存在这个页面，刷新后需重新输入。';
+        $('gateTitle').textContent = setupMode ? '首次设置管理密码' : '登录管理控制台';
+        $('gateDescription').textContent = setupMode ? '设置 8 至 128 位管理密码。首次设置只能在本机完成。' : '请输入当前设备的管理密码，刷新页面后需重新登录。';
         $('tokenLabel').textContent = setupMode ? '设置密码' : '管理密码';
-        $('tokenInput').placeholder = setupMode ? '至少 8 个字符' : '输入管理密码';
         $('tokenInput').minLength = setupMode ? 8 : 1;
         $('tokenInput').maxLength = 128;
         $('tokenInput').autocomplete = setupMode ? 'new-password' : 'off';
         $('confirmField').hidden = !setupMode;
         $('confirmInput').required = setupMode;
-        $('gateFootText').textContent = setupMode ? '首次设置只允许在本机进行' : '外网访问由登录后的开关控制';
         $('connectButton').textContent = setupMode ? '保存密码并进入' : '进入控制台';
     }
-
     configureGate();
     if (client) {
-        $('pageSubtitle').textContent = '管理公网端口与本机服务之间的转发关系。';
+        $('pageSubtitle').textContent = '管理公网端口与目标服务之间的转发关系。';
         $('connectedLabel').textContent = '已注册映射';
         $('connectedCaption').textContent = '已与服务端建立控制连接';
         $('waitingLabel').textContent = '待注册映射';
         $('waitingCaption').textContent = '连接恢复后自动重试';
+        $('activityLabel').textContent = '已配置目标';
+        $('activityCaption').textContent = '本机或局域网目标服务';
+        $('activityLabel').title = '已保存目标地址的映射数量';
         $('statusHeader').textContent = '注册状态';
-        $('statusHeader').title = '是否已向服务端注册此端口；不代表本地目标服务的健康状态';
-        $('statusFilter').setAttribute('aria-label', '按注册状态筛选');
-        $('statusFilter').querySelector('option[value="connected"]').textContent = statusText.connected;
-        $('statusFilter').querySelector('option[value="waiting"]').textContent = statusText.waiting;
-        $('activityLabel').textContent = '本地目标';
-        $('activityLabel').title = '已配置本地目标端口的映射数量';
-        $('activityCaption').textContent = '已设置目标的映射';
-        $('targetHeader').textContent = '本地目标';
-        $('roleHint').textContent = '请先在服务端开放公网端口，再在这里设置相同的端口和本机目标。断线后会自动重试。';
-        $('drawerNote').textContent = '保存后立即生效；服务端尚未开放该端口时，客户端会持续重试。';
+        $('targetHeader').textContent = '目标服务';
+        $('statusFilter').querySelector('[value="connected"]').textContent = '已注册';
+        $('statusFilter').querySelector('[value="waiting"]').textContent = '待注册';
+        $('roleHint').textContent = '配置保存后自动注册；目标地址从客户端所在机器访问。修改目标只影响新连接。';
+        $('targetHost').required = true;
         $('targetPort').required = true;
     }
 
-    function notice(message, error = false) {
-        const box = $('toast');
-        box.textContent = message;
-        box.classList.toggle('error', error);
-        box.hidden = false;
+    function notice(text, error = false) {
+        $('toast').textContent = text;
+        $('toast').classList.toggle('error', error);
+        $('toast').hidden = false;
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => {
-            box.hidden = true;
-        }, 4500);
+        toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4500);
     }
-
-    async function request(path, fields) {
-        const options = {headers: {Authorization: 'Bearer ' + token}, cache: 'no-store'};
-        if (fields) {
-            options.method = 'POST';
-            options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-            options.body = new URLSearchParams(fields);
-        }
-        const response = await fetch(path, options);
-        const body = await response.text();
-        if (!response.ok) {
-            const error = new Error(body || '请求失败，请稍后重试');
-            error.status = response.status;
-            throw error;
-        }
-        return body;
-    }
-
-    function closeDrawer() {
-        $('drawer').hidden = true;
-        $('drawerBackdrop').hidden = true;
-    }
-
-    function lock() {
-        token = '';
-        forwards = [];
-        $('tokenInput').value = '';
-        $('gate').hidden = false;
-        $('lockButton').hidden = true;
-        for (const id of ['addButton', 'refreshButton', 'searchInput', 'statusFilter', 'publicSwitch']) $(id).disabled = true;
-        for (const id of ['totalCount', 'connectedCount', 'waitingCount', 'activityCount']) $(id).textContent = '—';
-        $('updatedAt').textContent = '尚未读取';
-        closeDrawer();
-        render();
-        $('tokenInput').focus();
-    }
-
-    async function load(silent = false) {
-        if (!token) return;
+    async function request(path, fields, timeout = 8000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
         try {
-            const state = JSON.parse(await request('/api/forwards'));
-            if (!Array.isArray(state.forwards)) throw new Error('服务器返回的映射数据无效');
-            forwards = state.forwards.sort((a, b) => a.port - b.port);
-            const connected = forwards.filter(item => item.connected).length;
-            $('totalCount').textContent = forwards.length.toLocaleString('zh-CN');
-            $('connectedCount').textContent = connected.toLocaleString('zh-CN');
-            $('waitingCount').textContent = (forwards.length - connected).toLocaleString('zh-CN');
-            $('activityCount').textContent = (client ? forwards.filter(item => item.target != null).length : forwards.reduce((sum, item) => sum + (item.connections || 0), 0)).toLocaleString('zh-CN');
-            $('listCount').textContent = forwards.length.toLocaleString('zh-CN');
-            $('updatedAt').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            }).format(new Date());
-            render();
-            if (!silent) notice('映射状态已更新');
+            const options = {headers: {Authorization: 'Bearer ' + token}, cache: 'no-store', signal: controller.signal};
+            if (fields) {
+                options.method = 'POST'; options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+                options.body = new URLSearchParams(fields);
+            }
+            const response = await fetch(path, options);
+            const body = await response.text();
+            if (!response.ok) { const error = new Error(body || '操作失败'); error.status = response.status; throw error; }
+            return response.headers.get('Content-Type')?.includes('application/json') ? JSON.parse(body) : body;
         } catch (error) {
-            if (error.status === 401 && $('gate').hidden) {
-                lock();
-                $('gateError').textContent = '管理令牌已失效，请重新输入。';
-            } else if (!silent) notice(error.message, true);
+            if (error.status == null) {
+                error.status = 0;
+                error.message = error.name === 'AbortError' ? '管理服务响应超时' : '无法连接管理服务';
+                if (fields) error.message += '，操作结果尚未确认，请在连接恢复后检查列表';
+            }
             throw error;
+        } finally { clearTimeout(timer); }
+    }
+    function markStale(error) {
+        stale = true;
+        $('connectionBanner').hidden = false;
+        $('connectionDescription').textContent = error.message + '。当前显示上一次的数据' + (lastSuccess ? '（' + clock(lastSuccess) + '）' : '') + '，恢复连接后会自动更新。';
+        $('mainContent').classList.add('stale');
+        syncControls();
+    }
+    function handleError(error, inline) {
+        if (error.status === 401 || error.status === 403) {
+            lock(); $('gateError').textContent = error.message;
+        } else {
+            if (error.status === 0) markStale(error);
+            if (inline) $(inline).textContent = error.message; else notice(error.message, true);
         }
     }
-
-    function cell(row, value, className = '') {
-        const td = document.createElement('td');
-        td.className = className;
-        if (value instanceof Node) td.append(value);
-        else td.textContent = value;
-        row.append(td);
-        return td;
+    async function load(silent = true) {
+        if (!token) return;
+        if (loading) return loading;
+        const epoch = generation;
+        const job = (async () => {
+            try {
+                const [state, directory] = await Promise.all([request('/api/forwards'), client ? Promise.resolve({clients: []}) : request('/api/clients')]);
+                if (epoch !== generation || !token) return;
+                if (!Array.isArray(state.forwards) || !Array.isArray(directory.clients)) throw new Error('返回的管理数据无效');
+                forwards = state.forwards.slice().sort((a, b) => a.port - b.port);
+                clients = directory.clients;
+                for (const port of selected) if (!forwards.some(item => item.port === port)) selected.delete(port);
+                lastSuccess = Date.now(); stale = false;
+                $('connectionBanner').hidden = true; $('mainContent').classList.remove('stale');
+                render(); renderClients();
+                if (!silent) notice('状态已更新');
+            } catch (error) {
+                if (epoch !== generation) return;
+                if (error.status === 401 || error.status === 403) handleError(error); else markStale(error);
+                throw error;
+            }
+        })();
+        loading = job; syncControls();
+        try { return await job; } finally { if (loading === job) loading = null; syncControls(); }
     }
-
-    function span(value, className) {
-        const element = document.createElement('span');
-        element.className = className;
-        element.textContent = value;
-        return element;
+    async function loadSettings() {
+        const settings = await request('/api/settings');
+        $('publicSwitch').checked = Boolean(settings.publicAccess);
+        $('accessDescription').textContent = settings.publicAccess ? '已允许其他设备访问' : '当前仅本机可访问';
+        canChangePassword = Boolean(settings.canChangePassword);
+        syncControls();
     }
-
-    function render() {
-        const query = $('searchInput').value.trim();
+    function status(item) {
+        if (item.enabled === false || item.state === 'paused') return ['已暂停', 'paused'];
+        if (item.connected) return [client ? '已注册' : '在线', 'connected'];
+        if (item.state === 'connecting') return ['注册中', 'waiting'];
+        if (item.state === 'error') return [client ? '注册失败' : '监听异常', 'failed'];
+        return [client ? '待注册' : '离线', 'waiting'];
+    }
+    function visibleRows() {
+        const query = $('searchInput').value.trim().toLowerCase();
         const filter = $('statusFilter').value;
-        const shown = forwards.filter(item =>
-            (!query || String(item.port).includes(query) || (item.target != null && String(item.target).includes(query))) &&
-            (filter === 'all' || (filter === 'connected') === Boolean(item.connected)));
-        const pages = Math.max(1, Math.ceil(shown.length / 20));
+        return forwards.filter(item => {
+            const text = [item.port, item.target, item.targetHost, item.clientName, item.clientId].filter(value => value != null).join(' ').toLowerCase();
+            const enabled = item.enabled !== false;
+            return (!query || text.includes(query)) && (filter === 'all' || filter === 'paused' && !enabled
+                || filter === 'connected' && enabled && item.connected || filter === 'waiting' && enabled && !item.connected
+                || filter === 'error' && item.state === 'error');
+        });
+    }
+    function render() {
+        const connected = forwards.filter(item => item.connected).length;
+        const paused = forwards.filter(item => item.enabled === false).length;
+        $('totalCount').textContent = String(forwards.length);
+        $('totalCaption').textContent = paused ? '其中 ' + paused + ' 个已暂停' : '已保存的规则';
+        $('connectedCount').textContent = String(connected);
+        $('waitingCount').textContent = String(forwards.length - connected - paused);
+        $('activityCount').textContent = String(client ? forwards.filter(item => item.target != null).length : forwards.reduce((sum, item) => sum + (item.connections || 0), 0));
+        $('listCount').textContent = String(forwards.length);
+        $('updatedAt').textContent = lastSuccess ? '更新于 ' + new Date(lastSuccess).toLocaleTimeString('zh-CN', {hour12: false}) : '尚未读取';
+        const shown = visibleRows(), pages = Math.max(1, Math.ceil(shown.length / 20));
         page = Math.min(page, pages);
-        const tbody = $('mappingRows');
+        const rows = shown.slice((page - 1) * 20, page * 20), tbody = $('mappingRows');
         tbody.replaceChildren();
-        if (!shown.length) {
-            const row = document.createElement('tr');
-            const td = cell(row, '');
-            td.colSpan = client ? 4 : 5;
-            const box = document.createElement('div');
-            box.className = 'empty';
-            const title = document.createElement('strong');
-            title.textContent = token ? (forwards.length ? '没有匹配的映射' : '还没有端口映射') : '请先登录管理页';
-            const detail = document.createElement('p');
-            detail.textContent = token ? (forwards.length ? '试试其他端口或状态。' : '点击“新增映射”开始配置。') : '登录后可查看和管理端口映射。';
-            box.append(span('◫', 'empty-icon'), title, detail);
-            td.append(box);
-            tbody.append(row);
+        if (!rows.length) {
+            const row = element('tr'), td = cell(row, ''); td.colSpan = client ? 5 : 6;
+            const box = element('div', '', 'empty');
+            box.append(element('strong', token ? (forwards.length ? '没有匹配的映射' : '还没有端口映射') : '请先登录管理页'),
+                element('p', forwards.length ? '调整搜索条件或状态筛选。' : '使用新增映射或批量添加开始配置。'));
+            td.append(box); tbody.append(row);
         }
-        for (const item of shown.slice((page - 1) * 20, page * 20)) {
-            const row = document.createElement('tr');
-            cell(row, span(String(item.port), 'port-main')).append(span('TCP · 公网', 'port-sub'));
-            cell(row, item.target != null ? '127.0.0.1 : ' + item.target : '由客户端指定', item.target == null ? 'target-muted' : 'target-main');
-            const status = span(item.connected ? statusText.connected : statusText.waiting,
-                'status ' + (item.connected ? 'connected' : 'waiting'));
-            status.title = client
-                ? (item.connected ? '已向服务端注册此端口' : '尚未完成注册，客户端会自动重试')
-                : (item.connected ? '该端口的客户端控制连接正常' : '该端口暂无客户端控制连接');
-            cell(row, status);
-            if (!client) {
-                const connections = cell(row, String(item.connections || 0), 'connection-count');
-                connections.title = '当前外部 TCP 连接数，包含等待接通的连接';
+        for (const item of rows) {
+            const row = element('tr'), checkbox = document.createElement('input');
+            checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.port); checkbox.disabled = !token;
+            checkbox.setAttribute('aria-label', '选择端口 ' + item.port);
+            checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(item.port) : selected.delete(item.port); render(); });
+            cell(row, checkbox, 'checkbox-cell');
+            cell(row, element('span', String(item.port), 'port-main')).append(element('span', 'TCP · 公网', 'port-sub'));
+            const target = cell(row, item.target != null ? address(item.targetHost || '127.0.0.1', item.target) : '等待客户端上报', item.target == null ? 'target-muted' : 'target-main');
+            if (!client && item.clientName) target.append(element('span', item.clientName, 'port-sub'));
+            const [label, className] = status(item), state = element('span', label, 'status ' + className);
+            state.title = item.connected ? '客户端控制连接已建立；不代表目标应用健康状态' : item.enabled === false ? '配置已保留，恢复后重新注册' : '等待控制连接建立或恢复';
+            const statusCell = cell(row, state);
+            if (item.lastError) { const detail = element('span', item.lastError, 'status-detail'); detail.title = item.lastError; statusCell.append(detail); }
+            else if (client && item.enabled !== false && !item.connected) statusCell.append(element('span', '自动重试中', 'port-sub'));
+            if (!client) { const count = cell(row, String(item.connections || 0), 'connection-count'); count.title = '含等待接通的外部 TCP 连接'; }
+            const actions = element('div', '', 'row-actions');
+            for (const [text, action, css] of [
+                ['诊断', () => openDiagnostic(item.port), ''], ['编辑', () => openDrawer(item), 'write-action'],
+                [item.enabled === false ? '启用' : '暂停', () => openBatch(item.enabled === false ? 'enable' : 'disable', [item.port]), 'write-action'],
+                ['删除', () => deleteForward(item), 'delete write-action']]) {
+                const button = element('button', text, css); button.type = 'button'; button.disabled = !writable();
+                button.setAttribute('aria-label', text + '端口 ' + item.port); button.addEventListener('click', action); actions.append(button);
             }
-            const actions = document.createElement('div');
-            actions.className = 'row-actions';
-            const edit = document.createElement('button');
-            edit.type = 'button';
-            edit.textContent = '编辑';
-            edit.setAttribute('aria-label', '编辑端口 ' + item.port);
-            edit.addEventListener('click', () => openDrawer(item));
-            const remove = document.createElement('button');
-            remove.type = 'button';
-            remove.className = 'delete';
-            remove.textContent = '删除';
-            remove.setAttribute('aria-label', '删除端口 ' + item.port);
-            remove.addEventListener('click', () => deleteForward(item));
-            actions.append(edit, remove);
-            cell(row, actions);
-            tbody.append(row);
+            cell(row, actions); tbody.append(row);
         }
-        $('resultSummary').textContent = shown.length ? `显示 ${(page - 1) * 20 + 1}–${Math.min(page * 20, shown.length)} 条，共 ${shown.length} 条` : '共 0 条映射';
-        $('pageIndicator').textContent = shown.length ? `${page} / ${pages}` : '—';
-        $('prevButton').disabled = page <= 1;
-        $('nextButton').disabled = page >= pages;
+        $('selectPage').checked = rows.length > 0 && rows.every(item => selected.has(item.port));
+        $('selectPage').indeterminate = rows.some(item => selected.has(item.port)) && !$('selectPage').checked;
+        $('selectionBar').hidden = selected.size === 0;
+        $('selectionCount').textContent = '已选择 ' + selected.size + ' 个映射';
+        $('resultSummary').textContent = shown.length ? '显示 ' + ((page - 1) * 20 + 1) + '–' + Math.min(page * 20, shown.length) + ' 条，共 ' + shown.length + ' 条' : '共 0 条映射';
+        $('pageIndicator').textContent = shown.length ? page + ' / ' + pages : '—';
+        $('prevButton').disabled = page <= 1; $('nextButton').disabled = page >= pages;
+        syncControls();
     }
-
+    function renderClients() {
+        $('clientCount').textContent = String(clients.length);
+        const body = $('clientRows'); body.replaceChildren();
+        if (!clients.length) { const row = element('tr'), td = cell(row, '尚无客户端注册记录', 'empty'); td.colSpan = 6; body.append(row); }
+        for (const item of clients) {
+            const row = element('tr');
+            cell(row, element('span', item.name || '未命名客户端', 'port-main')).append(element('span', (item.id || '').slice(0, 12) + ' · ' + (item.version || '旧版'), 'port-sub'));
+            cell(row, item.address || '—'); cell(row, element('span', item.online ? '在线' : '离线', 'status ' + (item.online ? 'connected' : 'paused')));
+            const mappings = item.mappings || [];
+            cell(row, mappings.filter(mapping => mapping.connected).length + ' 在线 / ' + mappings.length + ' 个端口');
+            cell(row, clock(item.lastSeenAt));
+            const button = element('button', '查看映射', 'text-button'); button.type = 'button';
+            button.addEventListener('click', () => { showView('mappings'); $('searchInput').value = item.id; page = 1; render(); });
+            const actions = element('div', '', 'row-actions'); actions.append(button); cell(row, actions); body.append(row);
+        }
+    }
+    function showView(next) {
+        view = next;
+        $('mappingView').hidden = view !== 'mappings'; $('mappingActions').hidden = view !== 'mappings'; $('clientsView').hidden = view !== 'clients';
+        $('pageTitle').textContent = view === 'clients' ? '客户端' : '端口映射';
+        $('pageSubtitle').textContent = view === 'clients' ? '查看客户端身份、接入来源和端口注册情况。' : client ? '管理公网端口与目标服务之间的转发关系。' : '管理服务端开放的公网 TCP 端口。';
+        for (const [id, name] of [['showMappings', 'mappings'], ['showClients', 'clients']]) {
+            $(id).classList.toggle('active', view === name);
+            if (view === name) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
+        }
+    }
+    function closeDrawer() { $('drawer').hidden = true; $('drawerBackdrop').hidden = true; }
     function openDrawer(item) {
-        $('mappingForm').reset();
-        $('oldPort').value = item ? item.port : '';
-        $('remotePort').value = item ? item.port : '';
-        $('targetPort').value = item?.target ?? '';
+        $('mappingForm').reset(); $('drawerError').textContent = '';
+        $('oldPort').value = item ? item.port : ''; $('remotePort').value = item ? item.port : '';
+        $('targetHost').value = item?.targetHost || '127.0.0.1'; $('targetPort').value = item?.target ?? '';
         $('drawerTitle').textContent = item ? '编辑映射' : '新增映射';
-        $('drawerIntro').textContent = item ? '调整端口配置，保存后立即应用。' : (client ? '指定公网端口和本机服务的目标端口。' : '设置需要开放的公网端口。');
-        $('drawerBackdrop').hidden = false;
-        $('drawer').hidden = false;
-        $('remotePort').focus();
+        $('drawerIntro').textContent = client ? '保存目标地址，客户端会自动向服务端注册。' : '服务端开放端口后，客户端即可申请注册。';
+        $('drawerNote').textContent = item?.enabled === false ? '当前映射已暂停，保存后仍保持暂停。'
+            : client ? '目标修改只影响新连接；更换公网端口会中断该映射的现有连接。' : '更换公网端口会中断该映射的现有连接，目标服务地址由客户端配置。';
+        $('drawerBackdrop').hidden = false; $('drawer').hidden = false; $('remotePort').focus();
     }
-
-    function confirmDelete(port) {
+    function confirmOperation(title, details, label = '确认') {
+        if (finishConfirmation) return Promise.resolve(false);
         return new Promise(resolve => {
-            const dialog = $('deleteDialog');
-            if (dialog.open) {
-                resolve(false);
-                return;
-            }
-            $('deletePort').textContent = String(port);
-            const listeners = new AbortController();
-            const finish = accepted => {
-                listeners.abort();
-                dialog.close();
-                resolve(accepted);
-            };
+            const dialog = $('deleteDialog'), listeners = new AbortController();
+            $('deleteTitle').textContent = title; $('deleteMessage').textContent = details; $('deleteSubmit').textContent = label;
+            const finish = accepted => { listeners.abort(); dialog.close(); finishConfirmation = null; resolve(accepted); };
+            finishConfirmation = finish;
             $('deleteCancel').addEventListener('click', () => finish(false), {signal: listeners.signal});
             $('deleteSubmit').addEventListener('click', () => finish(true), {signal: listeners.signal});
-            dialog.addEventListener('cancel', event => {
-                event.preventDefault();
-                finish(false);
-            }, {signal: listeners.signal});
+            dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); }, {signal: listeners.signal});
             dialog.showModal();
         });
     }
-
     async function deleteForward(item) {
-        if (!await confirmDelete(item.port)) return;
+        if (!await confirmOperation('删除端口映射？', '端口 ' + item.port + ' 的现有连接会断开，配置也会被删除。', '删除映射')) return;
+        if (!writable()) return;
+        try { const result = await request('/api/forwards/delete', {port: item.port}); selected.delete(item.port); await load(); notice(message(result, '映射已删除')); }
+        catch (error) { handleError(error); }
+    }
+    function openBatch(action, ports = []) {
+        batchAction = action; previewKey = ''; $('batchError').textContent = ''; $('batchPreview').hidden = true;
+        const names = {add: '批量添加', enable: '批量启用', disable: '批量暂停', delete: '批量删除'};
+        $('batchTitle').textContent = names[action]; $('batchEntries').readOnly = action !== 'add';
+        $('batchEntries').value = action === 'add' ? '' : ports.join(',');
+        $('batchHint').textContent = action === 'add' ? (client ? '每行一个映射，支持 公网端口:目标端口 或 公网端口:目标地址:目标端口。' : '支持单端口、逗号分隔和区间；区间不包含结束端口。') : '先预览操作范围，确认后统一保存。暂停和删除会中断现有连接。';
+        $('batchEntries').placeholder = client ? '18080:127.0.0.1:8080\n20000:192.168.1.10:9000' : '18080,20000-20010';
+        $('batchDialog').showModal(); syncControls();
+    }
+    async function previewBatch() {
+        $('batchError').textContent = ''; previewKey = ''; setBusy('previewBatch', true); $('previewBatch').disabled = true;
+        const entries = $('batchEntries').value;
         try {
-            await request('/api/forwards/delete', {port: item.port});
-            await load(true);
-            notice('端口 ' + item.port + ' 已删除并保存');
-        } catch (error) {
-            notice(error.message, true);
+            const result = await request('/api/forwards/batch/preview', {action: batchAction, entries});
+            if (entries !== $('batchEntries').value) return;
+            previewKey = batchAction + '\n' + entries;
+            $('batchPreview').replaceChildren(element('strong', '共 ' + result.count + ' 个映射'),
+                element('p', result.ports.slice(0, 12).join(', ') + (result.ports.length > 12 ? ' …' : '')),
+                element('p', (result.connections || 0) + ' 条现有连接涉及此次操作。' + result.message));
+            $('batchPreview').hidden = false;
+        } catch (error) { handleError(error, 'batchError'); }
+        finally { busy.delete('previewBatch'); $('previewBatch').disabled = !writable(); syncControls(); }
+    }
+    async function applyBatch() {
+        if (!previewKey || !writable()) return;
+        setBusy('applyBatch', true);
+        try {
+            const result = await request('/api/forwards/batch', {action: batchAction, entries: $('batchEntries').value}, 45000);
+            for (const port of result.ports) selected.delete(port);
+            $('batchDialog').close(); previewKey = ''; await load(); notice(message(result, '批量操作已完成'));
+        } catch (error) { previewKey = ''; $('batchPreview').hidden = true; handleError(error, 'batchError'); }
+        finally { setBusy('applyBatch', false); }
+    }
+    async function openDiagnostic(port) {
+        const epoch = ++diagnosticGeneration;
+        diagnosticPort = port; $('diagnosticTitle').textContent = '映射诊断 · ' + port;
+        if (!$('diagnosticDialog').open) $('diagnosticDialog').showModal();
+        $('diagnosticChecks').replaceChildren(element('p', '正在检查连接，请稍候…', 'modal-note'));
+        $('rerunDiagnostic').disabled = true;
+        try {
+            const result = await request('/api/forwards/diagnose', {port}, 12000);
+            if (epoch !== diagnosticGeneration) return;
+            $('diagnosticTime').textContent = '检查于 ' + clock(result.checkedAt); $('diagnosticChecks').replaceChildren();
+            const labels = {passed: '通过', failed: '失败', skipped: '未检查', pending: '等待'};
+            for (const check of result.checks) {
+                const row = element('div', '', 'diagnostic-row'), heading = element('div', '', 'diagnostic-heading');
+                heading.append(element('strong', check.name), element('span', labels[check.status] || check.status, 'check-state ' + check.status));
+                row.append(heading, element('p', check.detail), element('small', check.durationMs ? check.durationMs + ' ms' : ''));
+                $('diagnosticChecks').append(row);
+            }
+        } catch (error) { if (epoch === diagnosticGeneration) { $('diagnosticChecks').replaceChildren(element('p', error.message, 'form-error')); handleError(error); } }
+        finally { if (epoch === diagnosticGeneration) $('rerunDiagnostic').disabled = false; }
+    }
+    function lock() {
+        diagnosticGeneration++;
+        token = ''; generation++; loading = null; stale = false; forwards = []; clients = []; selected.clear();
+        $('gate').hidden = false; $('lockButton').hidden = true; $('passwordButton').hidden = true;
+        $('tokenInput').value = ''; $('confirmInput').value = ''; $('connectionBanner').hidden = true;
+        $('mainContent').classList.remove('stale'); closeDrawer();
+        if (finishConfirmation) finishConfirmation(false);
+        for (const id of ['diagnosticDialog', 'batchDialog', 'passwordDialog']) if ($(id).open) $(id).close();
+        $('passwordForm').reset(); previewKey = ''; showView('mappings'); render(); renderClients();
+        for (const id of ['totalCount', 'connectedCount', 'waitingCount', 'activityCount']) $(id).textContent = '—';
+        $('updatedAt').textContent = '尚未读取'; $('tokenInput').focus();
+    }
+
+    $('tokenForm').addEventListener('submit', async event => {
+        event.preventDefault(); $('gateError').textContent = '';
+        const password = $('tokenInput').value;
+        if (setupMode && password !== $('confirmInput').value) { $('gateError').textContent = '两次输入的密码不一致'; return; }
+        token = password; generation++; $('connectButton').disabled = true;
+        try {
+            if (setupMode) { await request('/api/setup', {password}); setupMode = false; configureGate(); }
+            await load(); await loadSettings();
+            $('gate').hidden = true; $('lockButton').hidden = false; $('passwordButton').hidden = false;
+            $('tokenInput').value = ''; $('confirmInput').value = ''; syncControls(); $('addButton').focus();
+        } catch (error) { token = ''; generation++; $('gateError').textContent = error.message; syncControls(); }
+        finally { $('connectButton').disabled = false; }
+    });
+    $('showToken').addEventListener('click', () => { const input = $('tokenInput'); input.type = input.type === 'password' ? 'text' : 'password'; $('showToken').textContent = input.type === 'password' ? '显示' : '隐藏'; });
+    $('lockButton').addEventListener('click', () => { $('gateError').textContent = ''; lock(); });
+    $('addButton').addEventListener('click', () => openDrawer(null));
+    $('batchButton').addEventListener('click', () => openBatch('add'));
+    $('showMappings').addEventListener('click', () => showView('mappings'));
+    $('showClients').addEventListener('click', () => showView('clients'));
+    for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).addEventListener('click', () => load(false).catch(() => {}));
+    for (const id of ['searchInput', 'statusFilter']) $(id).addEventListener(id === 'searchInput' ? 'input' : 'change', () => { page = 1; render(); });
+    $('prevButton').addEventListener('click', () => { page--; render(); }); $('nextButton').addEventListener('click', () => { page++; render(); });
+    $('selectPage').addEventListener('change', event => { const checked = event.target.checked; visibleRows().slice((page - 1) * 20, page * 20).forEach(item => checked ? selected.add(item.port) : selected.delete(item.port)); render(); });
+    $('clearSelection').addEventListener('click', () => { selected.clear(); render(); });
+    for (const [id, action] of [['enableSelected', 'enable'], ['disableSelected', 'disable'], ['deleteSelected', 'delete']]) $(id).addEventListener('click', () => openBatch(action, [...selected]));
+    for (const id of ['closeDrawer', 'cancelButton', 'drawerBackdrop']) $(id).addEventListener('click', closeDrawer);
+    document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => $(button.dataset.close).close()));
+    $('batchEntries').addEventListener('input', () => { previewKey = ''; $('batchPreview').hidden = true; syncControls(); });
+    $('previewBatch').addEventListener('click', previewBatch); $('applyBatch').addEventListener('click', applyBatch);
+    $('batchForm').addEventListener('submit', event => { event.preventDefault(); previewBatch(); });
+    $('rerunDiagnostic').addEventListener('click', () => openDiagnostic(diagnosticPort));
+    $('mappingForm').addEventListener('submit', async event => {
+        event.preventDefault(); $('drawerError').textContent = '';
+        if (!writable()) return;
+        const oldPort = $('oldPort').value, port = $('remotePort').value;
+        if (oldPort && oldPort !== port) {
+            const previous = forwards.find(item => String(item.port) === oldPort);
+            if (!await confirmOperation('更换公网端口？', '端口 ' + oldPort + ' 的 ' + (previous?.connections || 0) + ' 条现有连接会中断。', '保存并更换')) return;
         }
-    }
-
-    async function loadSettings() {
-        const settings = JSON.parse(await request('/api/settings'));
-        $('publicSwitch').checked = Boolean(settings.publicAccess);
-        $('publicSwitch').disabled = false;
-        $('accessDescription').textContent = settings.publicAccess ? '已允许其他设备访问' : '当前仅本机可访问';
-    }
-
+        if (!writable()) return;
+        const fields = {port}; if (oldPort) fields.oldPort = oldPort;
+        if (client) { fields.targetHost = $('targetHost').value.trim(); fields.target = $('targetPort').value; }
+        setBusy('saveButton', true);
+        try { const result = await request('/api/forwards', fields); closeDrawer(); await load(); notice(message(result, '配置已保存')); }
+        catch (error) { handleError(error, 'drawerError'); }
+        finally { setBusy('saveButton', false); }
+    });
     $('publicSwitch').addEventListener('change', async event => {
-        const enabled = event.target.checked;
-        event.target.disabled = true;
+        const enabled = event.target.checked; setBusy('publicSwitch', true);
         try {
             await request('/api/settings', {public: String(enabled)});
             $('accessDescription').textContent = enabled ? '已允许其他设备访问' : '当前仅本机可访问';
-            notice(enabled ? '外网访问已开启；还需放行系统或云防火墙端口' : '外网访问已关闭');
-            if (!enabled && !['127.0.0.1', 'localhost', '::1'].includes(location.hostname)) {
-                lock();
-                $('gateError').textContent = '外网访问已关闭，请在运行程序的电脑上重新打开管理页。';
-            }
-        } catch (error) {
-            event.target.checked = !enabled;
-            notice(error.message, true);
-        } finally {
-            event.target.disabled = !token;
-        }
+            notice(enabled ? '外网访问已开启，请确认防火墙已放行管理端口' : '外网访问已关闭');
+            if (!enabled && !['127.0.0.1', 'localhost', '::1', '[::1]'].includes(location.hostname)) { lock(); $('gateError').textContent = '外网访问已关闭，请从运行程序的电脑访问管理页'; }
+        } catch (error) { event.target.checked = !enabled; handleError(error); }
+        finally { setBusy('publicSwitch', false); }
     });
-    $('tokenForm').addEventListener('submit', async event => {
-        event.preventDefault();
-        token = $('tokenInput').value;
-        $('gateError').textContent = '';
-        if (setupMode && token !== $('confirmInput').value) {
-            $('gateError').textContent = '两次输入的密码不一致。';
-            return;
-        }
-        $('connectButton').disabled = true;
+    $('passwordButton').addEventListener('click', () => { $('passwordForm').reset(); $('passwordError').textContent = ''; $('passwordDialog').showModal(); $('currentPassword').focus(); });
+    $('passwordForm').addEventListener('submit', async event => {
+        event.preventDefault(); $('passwordError').textContent = '';
+        if ($('newPassword').value !== $('confirmPassword').value) { $('passwordError').textContent = '两次新密码不一致'; return; }
+        setBusy('savePassword', true);
         try {
-            if (setupMode) {
-                await request('/api/setup', {password: token});
-                setupMode = false;
-                configureGate();
-            }
-            await load(true);
-            await loadSettings();
-            $('gate').hidden = true;
-            $('lockButton').hidden = false;
-            for (const id of ['addButton', 'refreshButton', 'searchInput', 'statusFilter']) $(id).disabled = false;
-            $('tokenInput').value = '';
-            $('confirmInput').value = '';
-            $('addButton').focus();
-        } catch (error) {
-            $('gateError').textContent = error.status === 401 ? '密码不正确，请检查配置文件中的 ADMIN_TOKEN。' : error.message;
-            token = '';
-        } finally {
-            $('connectButton').disabled = false;
-        }
+            await request('/api/password', {currentPassword: $('currentPassword').value, newPassword: $('newPassword').value});
+            lock(); $('gateError').textContent = '密码已修改，请使用新密码登录';
+        } catch (error) { if (error.status === 0) markStale(error); $('passwordError').textContent = error.message; }
+        finally { setBusy('savePassword', false); }
     });
-    $('showToken').addEventListener('click', () => {
-        const input = $('tokenInput');
-        input.type = input.type === 'password' ? 'text' : 'password';
-        $('showToken').textContent = input.type === 'password' ? '显示' : '隐藏';
-        input.focus();
-    });
-    $('lockButton').addEventListener('click', () => {
-        $('gateError').textContent = '';
-        lock();
-    });
-    $('addButton').addEventListener('click', () => openDrawer(null));
-    $('refreshButton').addEventListener('click', () => load().catch(() => {
-    }));
-    $('searchInput').addEventListener('input', () => {
-        page = 1;
-        render();
-    });
-    $('statusFilter').addEventListener('change', () => {
-        page = 1;
-        render();
-    });
-    $('prevButton').addEventListener('click', () => {
-        page--;
-        render();
-    });
-    $('nextButton').addEventListener('click', () => {
-        page++;
-        render();
-    });
-    for (const id of ['closeDrawer', 'cancelButton', 'drawerBackdrop']) $(id).addEventListener('click', closeDrawer);
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && !$('drawer').hidden) closeDrawer();
-        if (event.key === '/' && $('gate').hidden && $('drawer').hidden && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
-            event.preventDefault();
-            $('searchInput').focus();
-        }
+        if (event.key === '/' && $('gate').hidden && $('drawer').hidden && !document.querySelector('dialog[open]') && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) { event.preventDefault(); showView('mappings'); $('searchInput').focus(); }
     });
-    $('mappingForm').addEventListener('submit', async event => {
-        event.preventDefault();
-        const oldPort = $('oldPort').value;
-        const port = $('remotePort').value;
-        const fields = {port};
-        if (oldPort) fields.oldPort = oldPort;
-        if (client) fields.target = $('targetPort').value;
-        $('saveButton').disabled = true;
-        try {
-            await request('/api/forwards', fields);
-            closeDrawer();
-            await load(true);
-            notice(`端口 ${port} 已保存并应用`);
-        } catch (error) {
-            notice(error.message, true);
-        } finally {
-            $('saveButton').disabled = false;
-        }
-    });
-    setInterval(() => {
-        if (token && document.visibilityState === 'visible' && $('drawer').hidden) load(true).catch(() => {
-        });
-    }, 15000);
-    $('tokenInput').focus();
+    setInterval(() => { if (token && document.visibilityState === 'visible') load().catch(() => {}); }, 5000);
+    document.addEventListener('visibilitychange', () => { if (token && document.visibilityState === 'visible') load().catch(() => {}); });
+    syncControls(); $('tokenInput').focus();
 })();

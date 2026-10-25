@@ -11,6 +11,8 @@ import dev.sunwenqi.tcpreverserelay.serverside.listen.control.IControlSocket;
  * @since 2024-07-01 13:46:20
  */
 public interface IServerListen {
+    default void updateClientInfo(IControlSocket control,
+            dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel info) {}
 
     /**
      * 格式化信息

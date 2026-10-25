@@ -2,10 +2,8 @@ package dev.sunwenqi.tcpreverserelay.config;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -24,14 +22,28 @@ public final class AdminSettingsFile {
     }
 
     public static synchronized void setPassword(Path file, String password) throws IOException {
-        if (password == null || password.length() < 8 || password.length() > 128
-                || !password.equals(password.trim()) || password.chars().anyMatch(Character::isISOControl)) {
-            throw new IllegalArgumentException("管理密码需为 8 至 128 个字符，不能包含首尾空格或控制字符");
-        }
+        validatePassword(password);
         if (!AdminTokenFile.readInFile(file).isEmpty()) {
             throw new IllegalStateException("管理密码已经设置，请使用现有密码登录");
         }
         save(file, "ADMIN_TOKEN", password);
+    }
+
+    public static synchronized void changePassword(Path file, String current, String next) throws IOException {
+        validatePassword(next);
+        synchronized (ForwardFile.class) {
+            String saved = AdminTokenFile.readInFile(file);
+            if (!java.security.MessageDigest.isEqual(saved.getBytes(StandardCharsets.UTF_8), current.getBytes(StandardCharsets.UTF_8)))
+                throw new IllegalArgumentException("当前密码与配置不一致，请刷新页面或重新启动程序后再试");
+            if (saved.equals(next)) throw new IllegalArgumentException("新密码不能与当前密码相同");
+            ConfigFile.update(file, java.util.Map.of("ADMIN_TOKEN", next));
+        }
+    }
+
+    private static void validatePassword(String password) {
+        if (password == null || password.length() < 8 || password.length() > 128
+                || !password.equals(password.trim()) || password.chars().anyMatch(Character::isISOControl))
+            throw new IllegalArgumentException("管理密码需为 8 至 128 个字符，不能包含首尾空格或控制字符");
     }
 
     public static synchronized void setPublicAccess(Path file, boolean enabled) throws IOException {
@@ -51,31 +63,7 @@ public final class AdminSettingsFile {
     }
 
     private static void save(Path file, String key, String value) throws IOException {
-        synchronized (ForwardFile.class) {
-            String original = Files.readString(file, StandardCharsets.UTF_8);
-            Matcher matcher = line(key).matcher(original);
-            if (matcher.find()) {
-                int start = matcher.start();
-                int end = matcher.end();
-                if (matcher.find()) throw new IOException("配置文件只能有一行 " + key + ": " + file);
-                original = original.substring(0, start) + key + "=" + value + original.substring(end);
-            } else {
-                original += (original.isEmpty() || original.endsWith("\n") ? "" : System.lineSeparator())
-                        + key + "=" + value + System.lineSeparator();
-            }
-            Path absolute = file.toAbsolutePath();
-            Path temporary = Files.createTempFile(absolute.getParent(), ".admin-settings-", ".tmp");
-            try {
-                Files.writeString(temporary, original, StandardCharsets.UTF_8);
-                try {
-                    Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(temporary, absolute, StandardCopyOption.REPLACE_EXISTING);
-                }
-            } finally {
-                Files.deleteIfExists(temporary);
-            }
-        }
+        ConfigFile.update(file, java.util.Map.of(key, value));
     }
 
     private static Pattern line(String key) {

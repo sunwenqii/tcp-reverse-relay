@@ -23,6 +23,8 @@ import java.nio.channels.SocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
 
 /**
  * <p>
@@ -60,6 +62,7 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
     @Getter
     private volatile boolean canceled = false;
     private volatile IControlSocket controlSocket;
+    private volatile ClientRegistration registration;
     private volatile IClearInvalidSocketPartThread clearInvalidSocketPartThread;
 
     public ServerListenThread(IListenServerConfig config) throws Exception {
@@ -261,6 +264,7 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
 
         IControlSocket controlSocket = this.controlSocket;
         if (Objects.nonNull(controlSocket)) {
+            if (registration != null) registration = registration.seen(controlSocket.getLastActivityAt());
             this.controlSocket = null;
             try {
                 controlSocket.close();
@@ -290,6 +294,12 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
 
         try {
             this.listenServerSocket.close();
+            // A closed channel remains registered until the selector processes cancellation.
+            // Wait briefly for deregistration so an immediate resume can bind the port again.
+            var channel = this.listenServerSocket.getChannel();
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(500);
+            while (channel != null && channel.isRegistered() && System.nanoTime() < until)
+                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000);
         } catch (Exception e) {
             // do nothing
         }
@@ -390,6 +400,11 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
      * @param socket
      */
     public synchronized void setControlSocket(Socket socket) {
+        setControlSocket(socket, new ClientControlModel(this.getListenPort()));
+    }
+
+    public synchronized void setControlSocket(Socket socket, ClientControlModel info) {
+        ClientRegistration nextRegistration = ClientRegistration.from(socket, info);
         log.info("setControlSocket[{}]", this.getListenPort());
 
         IControlSocket controlSocketNew = this.config.newControlSocket(socket, null);
@@ -405,9 +420,38 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
         }
 
         controlSocketNew.setServerListen(this);
-        controlSocketNew.startRecv();
+        this.registration = nextRegistration;
         this.controlSocket = controlSocketNew;
+        controlSocketNew.startRecv();
         this.start();
+    }
+
+    @Override
+    public synchronized void updateClientInfo(IControlSocket control, ClientControlModel info) {
+        if (control != controlSocket || registration == null) return;
+        // Source address and connection timestamps remain owned by the server.
+        ClientRegistration update = new ClientRegistration(info.getClientId(), info.getClientName(), registration.address(),
+                info.getClientVersion(), info.getProtocolVersion(),
+                dev.sunwenqi.tcpreverserelay.config.TargetAddress.validate(info.getTargetHost()),
+                dev.sunwenqi.tcpreverserelay.config.AppSettings.parsePort(String.valueOf(info.getTargetPort()), "目标端口"),
+                registration.connectedAt(), System.currentTimeMillis());
+        if (update.name() == null || update.name().isBlank() || update.name().length() > 64
+                || update.name().chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("无效的客户端名称");
+        registration = registration.updated(update);
+    }
+
+    public ClientRegistration registrationSnapshot() {
+        ClientRegistration current = registration;
+        IControlSocket control = controlSocket;
+        return current == null ? null : current.seen(control == null ? 0 : control.getLastActivityAt());
+    }
+
+    public TargetProbeResult probeTarget() throws Exception {
+        IControlSocket control = controlSocket;
+        ClientRegistration current = registration;
+        if (control == null || !isAlive) throw new IOException("客户端未连接");
+        if (current == null || current.protocol() < 2) throw new IOException("客户端版本不支持远程诊断，请升级客户端");
+        return control.probeTarget();
     }
 
     @Override

@@ -41,11 +41,12 @@ public class ClientControlProcess implements IProcess {
             return false;
         }
 
+        dev.sunwenqi.tcpreverserelay.serverside.listen.ClientRegistration.from(socketChannel.getSocket(), clientControlModel);
         socketChannel.writeAndFlush(
                 InteractiveModel.of(recvInteractiveModel.getInteractiveSeq(), InteractiveTypeEnum.COMMON_REPLY,
                         RelayResultModel.ofSuccess()));
 
-        serverListenThread.setControlSocket(socketChannel.getSocket());
+        serverListenThread.setControlSocket(socketChannel.getSocket(), clientControlModel);
         return true;
     }
 

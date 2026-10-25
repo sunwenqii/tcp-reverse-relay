@@ -14,9 +14,16 @@ import lombok.NoArgsConstructor;
  */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 public class ClientControlModel {
 
     private Integer listenPort;
+    private String clientId;
+    private String clientName;
+    private String clientVersion;
+    private int protocolVersion;
+    private String targetHost;
+    private Integer targetPort;
+
+    public ClientControlModel(Integer listenPort) { this.listenPort = listenPort; }
 
 }

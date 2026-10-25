@@ -7,6 +7,7 @@ import dev.sunwenqi.tcpreverserelay.executor.SimpleExecutor;
 import dev.sunwenqi.tcpreverserelay.nio.NioHallows;
 import dev.sunwenqi.tcpreverserelay.serverside.ServerRuntime;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -20,6 +21,7 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DynamicMappingIntegrationTest {
+    @BeforeEach void startNetworkLoop() { NioHallows.INSTANCE.start(); }
     @TempDir
     Path dir;
 

@@ -12,6 +12,10 @@ import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.time.ZoneId;
+import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
 
 /**
  * <p>
@@ -23,6 +27,16 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Slf4j
 public final class ClientControlThread implements Runnable, IBelongControl {
+    private static final ExecutorService REGISTRATIONS = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(4096), task -> { Thread t = new Thread(task, "relay-registration"); t.setDaemon(true); return t; });
+    private final AtomicBoolean attempting = new AtomicBoolean();
+    private volatile boolean queued;
+    private volatile boolean metadataDirty;
+    private volatile String lastError = "";
+    private volatile String targetError = "";
+    private volatile long lastAttemptAt;
+    private volatile long nextRetryAt;
+    private volatile long connectedAt;
 
     // 存储Socket部件的映射表，键为字符串类型，值为AbsSocketPart类型的对象
     private final Map<String, AbsSocketPart> socketPartMap = new ConcurrentHashMap<>();
@@ -57,49 +71,62 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      * @throws Exception
      */
     public boolean createControl() throws Exception {
-        this.stopClient();
-
-        if (this.clientAdapter == null) {
-            this.clientAdapter = this.config.newCreateControlAdapter(this);
+        if (cancelled || !attempting.compareAndSet(false, true)) return false;
+        lastAttemptAt = System.currentTimeMillis();
+        try {
+            this.stopClient();
+            if (this.clientAdapter == null) this.clientAdapter = this.config.newCreateControlAdapter(this);
+            boolean flag = this.clientAdapter.createControlChannel();
+            if (cancelled) { this.stopClient(); return false; }
+            if (!flag) { lastError = "服务端未接受该端口的注册"; return false; }
+            connectedAt = System.currentTimeMillis();
+            lastError = "";
+            targetError = "";
+            metadataDirty = false;
+            this.start();
+            return true;
+        } catch (Exception e) {
+            lastError = TcpDiagnostics.describe(e);
+            throw e;
+        } finally {
+            nextRetryAt = isAlive || cancelled ? 0 : System.currentTimeMillis() + 10_000;
+            attempting.set(false);
         }
-
-        boolean flag = this.clientAdapter.createControlChannel();
-
-        if (!flag) {
-            return false;
-        }
-
-        this.start();
-        return true;
     }
 
     /**
      * 首次连接失败时也启动现有的心跳重连任务。
      */
     public void startWithReconnect() {
-        try {
-            if (this.createControl()) {
-                return;
-            }
-        } catch (Exception e) {
-            log.warn("首次连接服务端失败，稍后重试：{}", this.config.getListenServerPort(), e);
-        }
         if (this.clientHeartThread == null) {
             this.clientHeartThread = this.config.newClientHeartThread(this);
         }
         this.clientHeartThread.start();
+        queued = true;
+        try {
+            REGISTRATIONS.execute(() -> {
+                try { createControl(); }
+                catch (Exception e) { log.warn("端口 {} 注册失败，将自动重试: {}", getListenServerPort(), lastError); }
+                finally { queued = false; }
+            });
+        } catch (RejectedExecutionException e) {
+            queued = false;
+            lastError = "注册队列繁忙，稍后自动重试";
+            nextRetryAt = System.currentTimeMillis() + 10_000;
+        }
     }
 
     @Override
     public void run() {
-        while (this.isAlive) {
+        Thread current = Thread.currentThread();
+        while (this.isAlive && this.myThread == current) {
             try {
                 // 使用适配器代理执行
                 this.clientAdapter.waitMessage();
             } catch (Exception e) {
                 log.warn("client control [{}] to server is exception,will stopClient",
                         this.config.getListenServerPort());
-                this.stopClient();
+                if (this.myThread == current) this.stopClient();
             }
         }
     }
@@ -121,7 +148,6 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      */
     private void start() {
         this.isAlive = true;
-        this.cancelled = false;
 
         // 检查并更新心跳线程
         Thread myThread = this.myThread;
@@ -149,6 +175,7 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      * * 停止客户端监听
      */
     public void stopClient() {
+        if (this.isAlive && !cancelled) lastError = "控制连接已断开，等待重新注册";
         this.isAlive = false;
 
         Thread myThread = this.myThread;
@@ -223,6 +250,12 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      */
     public void setDestIpPort(String destIp, Integer destPort) {
         this.config.setDestIpPort(destIp, destPort);
+        targetError = "";
+        metadataDirty = true;
+        if (isAlive) {
+            try { this.clientAdapter.sendClientInfo(); metadataDirty = false; }
+            catch (Exception e) { targetError = "目标已保存，客户端信息待同步"; }
+        }
     }
 
     /**
@@ -240,6 +273,7 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      * @throws Exception
      */
     public void sendHeartTest() throws Exception {
+        if (metadataDirty) { this.clientAdapter.sendClientInfo(); metadataDirty = false; }
         // 无需判空，空指针异常也是异常
         this.clientAdapter.sendHeartTest();
     }
@@ -271,5 +305,17 @@ public final class ClientControlThread implements Runnable, IBelongControl {
     public String formatInfo() {
         return String.valueOf(this.getListenServerPort());
     }
+
+    public boolean isConnecting() { return queued || attempting.get(); }
+    public String getLastError() { return isAlive ? targetError : lastError; }
+    public long getLastAttemptAt() { return lastAttemptAt; }
+    public long getNextRetryAt() { return nextRetryAt; }
+    public long getConnectedAt() { return connectedAt; }
+    public long getLastSeenAt() {
+        IClientAdapter<?, ?> adapter = clientAdapter;
+        return adapter == null ? 0 : adapter.obtainServerHeartLastRecvTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    }
+    public void recordTargetError(String error) { targetError = error; }
+    public int getConnectionCount() { return socketPartMap.size(); }
 
 }

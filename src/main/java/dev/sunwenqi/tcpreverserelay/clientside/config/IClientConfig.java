@@ -21,6 +21,8 @@ import java.nio.channels.spi.SelectorProvider;
  * @since 2025-01-08 16:30:04
  */
 public interface IClientConfig<R, W> {
+    default String getClientId() { return ""; }
+    default String getClientName() { return "client"; }
 
     /**
      * 获取服务端IP
@@ -105,7 +107,10 @@ public interface IClientConfig<R, W> {
         java.nio.channels.SocketChannel openSocketChannel = SelectorProvider.provider().openSocketChannel();
         // 使用SocketChannel连接到目标IP和端口
         try {
-            openSocketChannel.socket().connect(new InetSocketAddress(this.getDestIp(), this.getDestPort()), 5000);
+            String host;
+            int port;
+            synchronized (this) { host = getDestIp(); port = getDestPort(); }
+            openSocketChannel.socket().connect(new InetSocketAddress(host, port), 5000);
         } catch (Exception e) {
             openSocketChannel.close();
             throw e;

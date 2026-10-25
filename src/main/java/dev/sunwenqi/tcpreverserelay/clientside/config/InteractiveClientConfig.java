@@ -34,6 +34,8 @@ import java.nio.charset.StandardCharsets;
 @Slf4j
 @Data
 public class InteractiveClientConfig implements IClientConfig<InteractiveModel, InteractiveModel> {
+    private String clientId;
+    private String clientName;
 
     /**
      * 客户端服务IP地址，用于指定客户端请求的目标服务器IP
@@ -53,12 +55,12 @@ public class InteractiveClientConfig implements IClientConfig<InteractiveModel, 
     /**
      * 目标IP地址，用于指定数据传输的目标IP
      */
-    private String destIp;
+    private volatile String destIp;
 
     /**
      * 目标端口，用于指定数据传输的目标端口
      */
-    private Integer destPort;
+    private volatile Integer destPort;
 
     /**
      * 字符集，用于数据传输过程中的编码解码，默认使用UTF-8
@@ -80,7 +82,7 @@ public class InteractiveClientConfig implements IClientConfig<InteractiveModel, 
     private int tryRecipientCount = 10;
 
     @Override
-    public void setDestIpPort(String destIp, Integer destPort) {
+    public synchronized void setDestIpPort(String destIp, Integer destPort) {
         this.destIp = destIp;
         this.destPort = destPort;
     }

@@ -11,6 +11,10 @@ import dev.sunwenqi.tcpreverserelay.serverside.listen.IServerListen;
  * @since 2025-01-07 09:52:51
  */
 public interface IControlSocket {
+    default long getLastActivityAt() { return 0; }
+    default dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult probeTarget() throws Exception {
+        throw new UnsupportedOperationException("客户端版本不支持远程诊断");
+    }
 
     /**
      * 是否有效

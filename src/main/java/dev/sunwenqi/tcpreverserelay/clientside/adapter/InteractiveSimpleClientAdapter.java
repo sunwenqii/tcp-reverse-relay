@@ -6,6 +6,7 @@ import dev.sunwenqi.tcpreverserelay.clientside.ClientControlThread;
 import dev.sunwenqi.tcpreverserelay.clientside.config.IClientConfig;
 import dev.sunwenqi.tcpreverserelay.clientside.handler.IClientHandler;
 import dev.sunwenqi.tcpreverserelay.executor.RelayExecutor;
+import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
 import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
 import dev.sunwenqi.tcpreverserelay.model.RelayResultModel;
 import dev.sunwenqi.tcpreverserelay.model.enumeration.InteractiveTypeEnum;
@@ -100,7 +101,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
         try {
             socketChannel.getSocket().setSoTimeout(5000);
             InteractiveModel interactiveModel = InteractiveModel.of(InteractiveTypeEnum.CLIENT_CONTROL,
-                    new ClientControlModel(this.config.getListenServerPort()));
+                    this.registrationInfo());
             socketChannel.writeAndFlush(interactiveModel);
             InteractiveModel recv = socketChannel.read();
             log.debug("建立控制端口回复：{}", recv.getInteractiveType());
@@ -112,7 +113,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
                 connected = true;
                 return true;
             }
-            return false;
+            throw new IOException("端口注册失败：" + javaObject.getRetMsg());
         } finally {
             if (!connected) {
                 try {
@@ -137,6 +138,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
             destSocket = this.newDestSocket();
         } catch (Exception e) {
             log.error("向目标建立连接失败 {}:{}", this.config.getDestIp(), this.config.getDestPort());
+            this.clientControlThread.recordTargetError(TcpDiagnostics.describe(e));
             return false;
         }
 
@@ -195,6 +197,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
 
         // 将socket伙伴放入客户端线程进行统一管理
         this.clientControlThread.putSocketPart(serverWaitModel.getSocketPartKey(), socketPart);
+        this.clientControlThread.recordTargetError("");
         return true;
     }
 
@@ -217,6 +220,15 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
     protected void procMethod(InteractiveModel recvInteractiveModel) {
         log.debug("接收到新的指令: {}", recvInteractiveModel.getInteractiveType());
         try {
+            if (InteractiveTypeEnum.TARGET_PROBE.name().equals(recvInteractiveModel.getInteractiveType())) {
+                String host;
+                int port;
+                synchronized (this.config) { host = this.config.getDestIp(); port = this.config.getDestPort(); }
+                var result = TcpDiagnostics.probe(host, port);
+                this.getSocketChannel().writeAndFlush(InteractiveModel.of(recvInteractiveModel.getInteractiveSeq(),
+                        InteractiveTypeEnum.TARGET_PROBE_RESULT, result));
+                return;
+            }
             // 初始化进行标志为false，用于标记是否已处理接收到的交互模型
             boolean proceedFlag = false;
 
@@ -253,6 +265,25 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
     @Override
     public SocketChannel<? extends InteractiveModel, ? super InteractiveModel> getSocketChannel() {
         return this.socketChannel;
+    }
+
+    private ClientControlModel registrationInfo() {
+        ClientControlModel info = new ClientControlModel(this.config.getListenServerPort());
+        info.setClientId(this.config.getClientId());
+        info.setClientName(this.config.getClientName());
+        info.setClientVersion("1.1.0");
+        info.setProtocolVersion(2);
+        synchronized (this.config) {
+            info.setTargetHost(this.config.getDestIp());
+            info.setTargetPort(this.config.getDestPort());
+        }
+        return info;
+    }
+
+    @Override
+    public void sendClientInfo() throws Exception {
+        if (this.socketChannel != null)
+            this.socketChannel.writeAndFlush(InteractiveModel.of(InteractiveTypeEnum.CLIENT_INFO, registrationInfo()));
     }
 
     /**

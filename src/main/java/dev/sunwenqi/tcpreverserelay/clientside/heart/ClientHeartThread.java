@@ -87,6 +87,7 @@ public class ClientHeartThread implements IClientHeartThread, Runnable {
             this.cancel();
             return;
         }
+        if (clientControlThread.isConnecting()) return;
 
         // 准备发送心跳数据到服务器，先记录日志
         log.debug("send client heart data to {}", clientControlThread.getListenServerPort());

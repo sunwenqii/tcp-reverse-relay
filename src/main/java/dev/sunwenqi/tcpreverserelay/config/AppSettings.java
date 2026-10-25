@@ -14,19 +14,32 @@ public final class AppSettings {
     private AppSettings() {
     }
 
-    public record Mapping(int remotePort, int localPort) {
+    public record Mapping(int remotePort, String targetHost, int localPort) {
+        public Mapping(int remotePort, int localPort) { this(remotePort, "127.0.0.1", localPort); }
+        public String configEntry() {
+            return remotePort + ":" + (targetHost.equals("127.0.0.1") ? Integer.toString(localPort)
+                    : TargetAddress.display(targetHost, localPort));
+        }
     }
 
     public record Server(TunnelMode mode, int handshakePort, int adminPort, List<Integer> forwards,
-                         SecurityConfig.Keys keys) {
+                         SecurityConfig.Keys keys, Set<Integer> disabledForwards) {
+        public Server(TunnelMode mode, int handshakePort, int adminPort, List<Integer> forwards, SecurityConfig.Keys keys) {
+            this(mode, handshakePort, adminPort, forwards, keys, Set.of());
+        }
     }
 
     public record Client(TunnelMode mode, String serverHost, int handshakePort, int adminPort,
-                         List<Mapping> forwards, SecurityConfig.Keys keys) {
+                         List<Mapping> forwards, SecurityConfig.Keys keys, String clientId, String clientName,
+                         Set<Integer> disabledForwards) {
+        public Client(TunnelMode mode, String serverHost, int handshakePort, int adminPort, List<Mapping> forwards,
+                      SecurityConfig.Keys keys) {
+            this(mode, serverHost, handshakePort, adminPort, forwards, keys, UUID.randomUUID().toString(), "client", Set.of());
+        }
     }
 
     public static Server server(Path path) throws IOException {
-        Properties p = read(path, Set.of("mode", "handshake.port", "admin.port", "admin.public", "forwards", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
+        Properties p = read(path, Set.of("mode", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
         AdminSettingsFile.publicAccess(path);
         TunnelMode mode = mode(p);
         int handshake = port(p, "handshake.port");
@@ -35,11 +48,11 @@ public final class AppSettings {
             throw new IllegalArgumentException("handshake.port 与 admin.port 不能相同");
         }
         List<Integer> forwards = PortRanges.parse(p.getProperty("forwards", ""), handshake, admin);
-        return new Server(mode, handshake, admin, forwards, keys(p));
+        return new Server(mode, handshake, admin, forwards, keys(p), disabled(p, new HashSet<>(forwards)));
     }
 
     public static Client client(Path path) throws IOException {
-        Properties p = read(path, Set.of("mode", "server.host", "handshake.port", "admin.port", "admin.public", "forwards", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
+        Properties p = read(path, Set.of("mode", "server.host", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "client.id", "client.name", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
         AdminSettingsFile.publicAccess(path);
         TunnelMode mode = mode(p);
         String host = required(p, "server.host");
@@ -48,24 +61,44 @@ public final class AppSettings {
         }
         int handshake = port(p, "handshake.port");
         int admin = port(p, "admin.port");
-        List<Mapping> forwards = new ArrayList<>();
+        List<Mapping> forwards = parseMappings(p.getProperty("forwards", ""), admin);
+        Set<Integer> ports = new HashSet<>();
+        forwards.forEach(mapping -> ports.add(mapping.remotePort()));
+        Set<Integer> disabled = disabled(p, ports);
+        ClientIdentity identity = ClientIdentity.resolve(path, p);
+        return new Client(mode, host, handshake, admin, forwards, keys(p), identity.id(), identity.name(), disabled);
+    }
+
+    public static List<Mapping> parseMappings(String value, int admin) {
+        List<Mapping> result = new ArrayList<>();
         Set<Integer> seen = new HashSet<>();
-        for (String part : entries(p.getProperty("forwards", ""))) {
-            String[] pair = part.split(":", -1);
-            if (pair.length != 2) {
-                throw new IllegalArgumentException("客户端 forwards 应为 公网端口:本地端口，例如 18080:8080");
+        for (String entry : entries(value.trim().replaceAll("\\R+", ","))) {
+            int first = entry.indexOf(':');
+            if (first < 1) throw new IllegalArgumentException("映射格式为 公网端口:目标端口 或 公网端口:目标地址:目标端口");
+            int remote = parsePort(entry.substring(0, first), "公网端口");
+            String destination = entry.substring(first + 1).trim();
+            String host = "127.0.0.1", port = destination;
+            if (destination.contains(":")) {
+                int last = destination.lastIndexOf(':');
+                host = destination.substring(0, last);
+                port = destination.substring(last + 1);
+                if (host.contains(":") && !(host.startsWith("[") && host.endsWith("]")))
+                    throw new IllegalArgumentException("IPv6 目标地址需用方括号包围，例如 18080:[::1]:8080");
             }
-            int remote = parsePort(pair[0], "forwards 公网端口");
-            int local = parsePort(pair[1], "forwards 本地端口");
-            if (local == admin) {
-                throw new IllegalArgumentException("不能把本机管理端口 " + admin + " 作为转发目标");
-            }
-            if (!seen.add(remote)) {
-                throw new IllegalArgumentException("客户端 forwards 中公网端口重复: " + remote);
-            }
-            forwards.add(new Mapping(remote, local));
+            host = TargetAddress.validate(host);
+            int local = parsePort(port, "本地目标端口");
+            if (local == admin) throw new IllegalArgumentException("不能把管理端口 " + admin + " 作为转发目标");
+            if (!seen.add(remote)) throw new IllegalArgumentException("公网端口重复: " + remote);
+            result.add(new Mapping(remote, host, local));
         }
-        return new Client(mode, host, handshake, admin, List.copyOf(forwards), keys(p));
+        if (result.size() > 4096) throw new IllegalArgumentException("最多可配置 4096 个映射");
+        return List.copyOf(result);
+    }
+
+    private static Set<Integer> disabled(Properties p, Set<Integer> configured) {
+        Set<Integer> disabled = new LinkedHashSet<>(PortRanges.parse(p.getProperty("disabled.forwards", ""), 0, 0));
+        if (!configured.containsAll(disabled)) throw new IllegalArgumentException("disabled.forwards 只能包含已配置的公网端口");
+        return Set.copyOf(disabled);
     }
 
     private static SecurityConfig.Keys keys(Properties p) {
@@ -108,6 +141,7 @@ public final class AppSettings {
     }
 
     public static int parsePort(String raw, String key) {
+        if (raw == null || raw.isBlank()) throw new IllegalArgumentException(key + " 不能为空");
         try {
             int value = Integer.parseInt(raw.trim());
             if (value >= 1 && value <= 65535) {

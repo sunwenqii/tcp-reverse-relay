@@ -260,18 +260,22 @@ public final class NioHallows implements Runnable {
         }
         this.channelProcesserMap.remove(channel);
 
-        SelectionKey key = channel.keyFor(this.selector);
+        Selector current = this.selector;
+        if (current == null) return;
+        SelectionKey key = channel.keyFor(current);
 
         if (Objects.nonNull(key)) {
             key.cancel();
         }
+        current.wakeup();
     }
 
     @Override
     public void run() {
         CountWaitLatch countWaitLatch = this.countWaitLatch;
 
-        while (this.alive) {
+        Thread current = Thread.currentThread();
+        while (this.alive && this.myThread == current) {
             // 给注册事务一个时间，如果等待时间太长（可能需要注入的太多），就跳出再去获取新事件，防止饿死
             try {
                 countWaitLatch.await(this.getWakeupSleepNanos(), TimeUnit.NANOSECONDS);

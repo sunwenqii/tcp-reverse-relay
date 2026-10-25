@@ -16,6 +16,7 @@ import java.time.LocalDateTime;
  * @since 2025-01-08 16:22:43
  */
 public interface IClientAdapter<R, W> {
+    default void sendClientInfo() throws Exception {}
 
     /**
      * 请求建立控制器

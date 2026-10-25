@@ -93,7 +93,7 @@ class ManagementUiTest {
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(200, page.statusCode());
             assertTrue(page.body().contains("data-mode=\"client\""));
-            assertTrue(page.body().contains("客户端控制台"));
+            assertTrue(page.body().contains("客户端管理页"));
         }
     }
 
