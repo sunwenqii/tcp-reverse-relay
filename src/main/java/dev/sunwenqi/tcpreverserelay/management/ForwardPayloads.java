@@ -2,6 +2,7 @@ package dev.sunwenqi.tcpreverserelay.management;
 
 import java.util.*;
 
+import dev.sunwenqi.tcpreverserelay.forward.ConnectionStatus;
 import dev.sunwenqi.tcpreverserelay.forward.ForwardStatus;
 import dev.sunwenqi.tcpreverserelay.health.HealthSettings;
 
@@ -20,6 +21,11 @@ final class ForwardPayloads {
         result.put("health", Map.of("state", health.state(), "host", health.host(), "port", health.port(), "checkedAt", health.checkedAt(),
                 "durationMs", health.durationMs(), "failures", health.failures(), "intervalSeconds", health.intervalSeconds(), "message", health.message()));
         return result;
+    }
+    static Map<String, Object> connection(ConnectionStatus status) {
+        return Map.of("host", status.server().host(), "port", status.server().port(), "mode", status.mode(),
+                "enabledMappings", status.enabledMappings(), "registeredMappings", status.registeredMappings(),
+                "pendingMappings", status.pendingMappings(), "lastError", status.lastError());
     }
     static Map<String, Object> healthSettings(HealthSettings settings) {
         return Map.of("enabled", settings.enabled(), "intervalSeconds", settings.intervalSeconds(),

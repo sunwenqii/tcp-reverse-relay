@@ -3,6 +3,7 @@ package dev.sunwenqi.tcpreverserelay.forward;
 import java.io.IOException;
 import java.util.List;
 
+import dev.sunwenqi.tcpreverserelay.config.ServerConnection;
 import dev.sunwenqi.tcpreverserelay.health.HealthSettings;
 
 /**
@@ -27,5 +28,7 @@ public interface ForwardManager {
     default void assignOwner(int port, String clientId) throws IOException { throw new IllegalArgumentException("仅服务端支持端口归属管理"); }
     default HealthSettings healthSettings() { throw new IllegalArgumentException("仅客户端可设置目标检查"); }
     default void configureHealth(HealthSettings settings) throws IOException { throw new IllegalArgumentException("仅客户端可设置目标检查"); }
+    default ConnectionStatus connectionStatus() { return null; }
+    default boolean configureConnection(ServerConnection connection) throws IOException { throw new IllegalArgumentException("仅客户端支持服务器连接设置"); }
     default List<ClientInfo> clients() { return List.of(); }
 }

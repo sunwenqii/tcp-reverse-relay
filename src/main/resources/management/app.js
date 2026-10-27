@@ -7,7 +7,7 @@
     let stale = false, lastSuccess = 0, generation = 0, loading = null, canChangePassword = false;
     let toastTimer, batchAction = 'add', previewKey = '', diagnosticPort = null, diagnosticGeneration = 0, finishConfirmation = null;
     const selected = new Set(), busy = new Set();
-    let ownerPort = null;
+    let ownerPort = null, connection = null;
     const journalUI = window.RelayJournal.create({request, handleError, element, cell, clock, loggedIn: () => Boolean(token)});
 
     function element(tag, text = '', className = '') {
@@ -27,11 +27,12 @@
     function writable() { return Boolean(token) && !stale; }
     function setBusy(id, enabled) { enabled ? busy.add(id) : busy.delete(id); syncControls(); }
     function syncControls() {
-        for (const id of ['addButton', 'batchButton', 'publicSwitch', 'enableSelected', 'disableSelected', 'deleteSelected', 'saveButton', 'savePassword', 'healthButton', 'saveHealth', 'saveOwner'])
+        for (const id of ['addButton', 'batchButton', 'publicSwitch', 'enableSelected', 'disableSelected', 'deleteSelected', 'saveButton', 'savePassword', 'healthButton', 'saveHealth', 'saveOwner', 'saveConnection'])
             $(id).disabled = !writable() || busy.has(id);
         $('applyBatch').disabled = !writable() || busy.has('applyBatch') || !previewKey || previewKey !== batchAction + '\n' + $('batchEntries').value;
         for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).disabled = !token || Boolean(loading);
         for (const id of ['searchInput', 'statusFilter', 'selectPage', 'showClients', 'showEvents']) $(id).disabled = !token;
+        $('connectionButton').disabled = !writable() || !connection || busy.has('connectionButton');
         $('passwordButton').disabled = !writable() || !canChangePassword;
         $('passwordButton').title = canChangePassword ? '' : '当前实例的管理密码由外部配置提供';
         document.querySelectorAll('#mappingRows .row-actions button').forEach(button => { button.disabled = !writable(); });
@@ -121,6 +122,7 @@
                 if (!Array.isArray(state.forwards) || !Array.isArray(directory.clients)) throw new Error('返回的管理数据无效');
                 forwards = state.forwards.slice().sort((a, b) => a.port - b.port);
                 clients = directory.clients;
+                if (client) { connection = state.connection || null; renderConnection(); }
                 for (const port of selected) if (!forwards.some(item => item.port === port)) selected.delete(port);
                 lastSuccess = Date.now(); stale = false;
                 $('connectionBanner').hidden = true; $('mainContent').classList.remove('stale');
@@ -339,12 +341,13 @@
     function lock() {
         diagnosticGeneration++;
         token = ''; generation++; loading = null; stale = false; forwards = []; clients = []; selected.clear();
+        connection = null; renderConnection(); $('connectionForm').reset();
         journalUI.reset();
         $('gate').hidden = false; $('lockButton').hidden = true; $('passwordButton').hidden = true;
         $('tokenInput').value = ''; $('confirmInput').value = ''; $('connectionBanner').hidden = true;
         $('mainContent').classList.remove('stale'); closeDrawer();
         if (finishConfirmation) finishConfirmation(false);
-        for (const id of ['diagnosticDialog', 'batchDialog', 'passwordDialog', 'ownerDialog', 'healthDialog']) if ($(id).open) $(id).close();
+        for (const id of ['diagnosticDialog', 'batchDialog', 'passwordDialog', 'ownerDialog', 'healthDialog', 'connectionDialog']) if ($(id).open) $(id).close();
         $('passwordForm').reset(); previewKey = ''; showView('mappings'); render(); renderClients();
         for (const id of ['totalCount', 'connectedCount', 'waitingCount', 'activityCount']) $(id).textContent = '—';
         $('updatedAt').textContent = '尚未读取'; $('tokenInput').focus();
@@ -450,6 +453,46 @@
                 timeoutMillis: $('healthTimeout').value, failureThreshold: $('healthThreshold').value});
             $('healthDialog').close(); await load(); notice('检查设置已保存并生效');
         } catch (error) { handleError(error, 'healthError'); } finally { setBusy('saveHealth', false); }
+    });
+    function renderConnection() {
+        $('serverEndpoint').textContent = connection ? address(connection.host, connection.port) : '尚未读取';
+        const info = $('serverConnectionState');
+        info.classList.toggle('failed', Boolean(connection?.lastError));
+        info.textContent = !connection ? '登录后查看连接设置' : connection.enabledMappings === 0 ? '尚无启用的映射'
+            : connection.registeredMappings + ' / ' + connection.enabledMappings + ' 个映射已注册' + (connection.lastError ? ' · ' + connection.lastError : '');
+    }
+    $('connectionButton').addEventListener('click', async () => {
+        if (!writable() || busy.has('connectionButton')) return;
+        const epoch = generation;
+        setBusy('connectionButton', true);
+        try {
+            const current = await request('/api/connection/settings');
+            if (epoch !== generation || !token) return;
+            connection = current; renderConnection();
+            $('connectionHost').value = current.host; $('connectionPort').value = current.port;
+            $('connectionMode').textContent = '当前通信模式：' + current.mode + '。请保持两端通信模式一致；加密模式的密钥沿用配置文件，也需与服务端一致。';
+            $('connectionError').textContent = ''; $('connectionDialog').showModal(); $('connectionHost').focus();
+        } catch (error) { if (epoch === generation) handleError(error); }
+        finally { setBusy('connectionButton', false); }
+    });
+    $('connectionForm').addEventListener('submit', async event => {
+        event.preventDefault(); if (!writable() || busy.has('saveConnection')) return;
+        const epoch = generation, fields = {host: $('connectionHost').value.trim(), port: $('connectionPort').value};
+        const changed = fields.host !== connection?.host || Number(fields.port) !== connection?.port;
+        if (changed && forwards.some(item => item.enabled !== false)
+            && !await confirmOperation('切换服务器？', '现有转发连接将断开，所有启用的映射会向新服务器重新注册。', '切换并连接')) return;
+        if (!writable() || epoch !== generation) return;
+        setBusy('saveConnection', true); $('connectionError').textContent = '';
+        try {
+            const result = await request('/api/connection/settings', fields);
+            if (epoch !== generation || !token) return;
+            generation++; loading = null; diagnosticGeneration++;
+            connection = result.connection; forwards = result.forwards.slice().sort((a,b) => a.port-b.port);
+            renderConnection(); render(); $('connectionDialog').close();
+            notice(result.message);
+            await load();
+        } catch (error) { if (token) handleError(error, 'connectionError'); }
+        finally { setBusy('saveConnection', false); }
     });
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && !$('drawer').hidden) closeDrawer();

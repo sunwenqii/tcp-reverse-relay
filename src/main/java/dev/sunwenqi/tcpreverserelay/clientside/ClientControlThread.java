@@ -82,22 +82,29 @@ public final class ClientControlThread implements Runnable, IBelongControl {
         if (cancelled || !attempting.compareAndSet(false, true)) return false;
         lastAttemptAt = System.currentTimeMillis();
         try {
-            this.stopClient();
-            if (this.clientAdapter == null) this.clientAdapter = this.config.newCreateControlAdapter(this);
-            boolean flag = this.clientAdapter.createControlChannel();
-            if (cancelled) { this.stopClient(); return false; }
-            if (!flag) { registrationFailed("服务端未接受该端口的注册"); return false; }
-            boolean reconnected = connectedAt > 0;
-            connectedAt = System.currentTimeMillis();
-            lastError = "";
-            targetError = "";
-            metadataDirty = false;
-            sentHealth = null;
-            this.start();
-            reportedRegistrationError = "";
-            RuntimeEvents.event("client", "INFO", reconnected ? "连接恢复" : "端口注册", getListenServerPort(),
-                    reconnected ? "客户端控制连接已恢复" : "端口注册成功", "服务端: " + config.getClientServiceIp() + ":" + config.getClientServicePort());
-            return true;
+            IClientAdapter<?, ?> adapter;
+            synchronized (this) {
+                if (cancelled) return false;
+                this.stopClient();
+                if (this.clientAdapter == null) this.clientAdapter = this.config.newCreateControlAdapter(this);
+                adapter = this.clientAdapter;
+            }
+            boolean flag = adapter.createControlChannel();
+            synchronized (this) {
+                if (cancelled) { adapter.close(); return false; }
+                if (!flag) { registrationFailed("服务端未接受该端口的注册"); return false; }
+                boolean reconnected = connectedAt > 0;
+                connectedAt = System.currentTimeMillis();
+                lastError = "";
+                targetError = "";
+                metadataDirty = false;
+                sentHealth = null;
+                this.start();
+                reportedRegistrationError = "";
+                RuntimeEvents.event("client", "INFO", reconnected ? "连接恢复" : "端口注册", getListenServerPort(),
+                        reconnected ? "客户端控制连接已恢复" : "端口注册成功", "服务端: " + config.getClientServiceIp() + ":" + config.getClientServicePort());
+                return true;
+            }
         } catch (Exception e) {
             if (!cancelled) registrationFailed(TcpDiagnostics.describe(e));
             throw e;
@@ -119,7 +126,7 @@ public final class ClientControlThread implements Runnable, IBelongControl {
         try {
             REGISTRATIONS.execute(() -> {
                 try { createControl(); }
-                catch (Exception e) { log.warn("端口 {} 注册失败，将自动重试: {}", getListenServerPort(), lastError); }
+                catch (Exception e) { if (!cancelled) log.warn("端口 {} 注册失败，将自动重试: {}", getListenServerPort(), lastError); }
                 finally { queued = false; }
             });
         } catch (RejectedExecutionException e) {
@@ -214,7 +221,7 @@ public final class ClientControlThread implements Runnable, IBelongControl {
     /**
      * 全部退出
      */
-    public void cancell() {
+    public synchronized void cancell() {
         if (this.cancelled) {
             return;
         }

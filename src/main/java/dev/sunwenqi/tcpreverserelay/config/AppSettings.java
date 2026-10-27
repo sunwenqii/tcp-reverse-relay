@@ -64,12 +64,11 @@ public final class AppSettings {
         Properties p = read(path, Set.of("mode", "server.host", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "client.id", "client.name", "health.enabled", "health.interval.seconds", "health.timeout.millis", "health.failure.threshold", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
         AdminSettingsFile.publicAccess(path);
         TunnelMode mode = mode(p);
-        String host = required(p, "server.host");
-        if (host.contains("/") || host.contains(":") || host.chars().anyMatch(Character::isWhitespace)) {
-            throw new IllegalArgumentException("server.host 必须是 IPv4 地址或主机名");
-        }
-        int handshake = port(p, "handshake.port");
+        var connection = new ServerConnection(required(p, "server.host"), port(p, "handshake.port"));
+        String host = connection.host();
+        int handshake = connection.port();
         int admin = port(p, "admin.port");
+        connection.validateAdminPort(admin);
         List<Mapping> forwards = parseMappings(p.getProperty("forwards", ""), admin);
         Set<Integer> ports = new HashSet<>();
         forwards.forEach(mapping -> ports.add(mapping.remotePort()));

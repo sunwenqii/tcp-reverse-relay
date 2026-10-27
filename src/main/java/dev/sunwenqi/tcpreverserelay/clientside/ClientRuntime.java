@@ -15,6 +15,7 @@ import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
 public final class ClientRuntime implements ForwardManager {
     private final Path file;
     private final AppSettings.Client settings;
+    private volatile ServerConnection connection;
     private final LinkedHashMap<Integer, AppSettings.Mapping> mappings = new LinkedHashMap<>();
     private final LinkedHashMap<Integer, ClientControlThread> controls = new LinkedHashMap<>();
     private HealthSettings healthSettings;
@@ -23,6 +24,7 @@ public final class ClientRuntime implements ForwardManager {
     private final LinkedHashSet<Integer> disabled = new LinkedHashSet<>();
 
     public ClientRuntime(Path file, AppSettings.Client settings) { this.file = file; this.settings = settings;
+        connection = new ServerConnection(settings.serverHost(), settings.handshakePort());
         healthSettings = settings.health();
         health = new HealthMonitor(healthSettings, healthUpdates::put); }
 
@@ -135,15 +137,17 @@ public final class ClientRuntime implements ForwardManager {
     @Override public DiagnosticReport diagnose(int port) {
         AppSettings.Mapping mapping;
         ForwardStatus state;
+        ServerConnection serverConnection;
         synchronized (this) {
+            serverConnection = connection;
             mapping = mappings.get(port);
             if (mapping == null) throw new IllegalArgumentException("端口不存在: " + port);
             state = list().stream().filter(item -> item.port() == port).findFirst().orElseThrow();
         }
         var checks = new ArrayList<DiagnosticReport.Check>();
-        var server = TcpDiagnostics.probe(settings.serverHost(), settings.handshakePort());
+        var server = TcpDiagnostics.probe(serverConnection.host(), serverConnection.port());
         checks.add(new DiagnosticReport.Check("服务端连接", server.isReachable() ? "passed" : "failed",
-                TargetAddress.display(settings.serverHost(), settings.handshakePort()) + " · " + server.getMessage(), server.getDurationMs()));
+                TargetAddress.display(serverConnection.host(), serverConnection.port()) + " · " + server.getMessage(), server.getDurationMs()));
         checks.add(new DiagnosticReport.Check("端口注册", !state.enabled() ? "skipped" : state.connected() ? "passed" : "pending",
                 !state.enabled() ? "映射已暂停" : state.connected() ? "服务端已接受此端口注册" : state.lastError().isEmpty() ? "等待注册" : state.lastError(), 0));
         var target = TcpDiagnostics.probe(mapping.targetHost(), mapping.localPort());
@@ -151,6 +155,31 @@ public final class ClientRuntime implements ForwardManager {
         checks.add(new DiagnosticReport.Check("目标服务", target.isReachable() ? "passed" : "failed",
                 TargetAddress.display(mapping.targetHost(), mapping.localPort()) + " · " + target.getMessage(), target.getDurationMs()));
         return new DiagnosticReport(port, System.currentTimeMillis(), checks, DiagnosticReport.NOTE);
+    }
+
+    @Override public synchronized ConnectionStatus connectionStatus() {
+        var active = list().stream().filter(ForwardStatus::enabled).toList();
+        int registered = (int) active.stream().filter(ForwardStatus::connected).count();
+        String error = active.stream().filter(item -> !item.connected()).map(ForwardStatus::lastError)
+                .filter(value -> !value.isBlank()).findFirst().orElse("");
+        String mode = switch (settings.mode()) { case SIMPLE -> "simple"; case SECRET -> "secret"; case SECRET_ALL -> "secretAll"; };
+        return new ConnectionStatus(connection, mode, active.size(), registered, error);
+    }
+
+    @Override public synchronized boolean configureConnection(ServerConnection next) throws IOException {
+        next.validateAdminPort(settings.adminPort());
+        boolean changed = !next.equals(connection);
+        var replacements = new LinkedHashMap<Integer, ClientControlThread>();
+        if (changed) for (var mapping : mappings.values())
+            if (!disabled.contains(mapping.remotePort())) replacements.put(mapping.remotePort(), create(mapping, next));
+        // Persist both fields atomically before touching any live connection.
+        ConfigFile.update(file, next.properties());
+        if (!changed) return false;
+        controls.values().forEach(ClientControlThread::cancell);
+        connection = next;
+        controls.clear(); controls.putAll(replacements);
+        controls.values().forEach(ClientControlThread::startWithReconnect);
+        return true;
     }
 
     @Override public synchronized HealthSettings healthSettings() { return healthSettings; }
@@ -164,7 +193,9 @@ public final class ClientRuntime implements ForwardManager {
         controls.clear(); mappings.clear(); disabled.clear();
     }
 
-    private ClientControlThread create(AppSettings.Mapping mapping) {
+    private ClientControlThread create(AppSettings.Mapping mapping) { return create(mapping, connection); }
+
+    private ClientControlThread create(AppSettings.Mapping mapping, ServerConnection server) {
         InteractiveClientConfig config;
         if (settings.mode() == TunnelMode.SIMPLE) config = new InteractiveClientConfig();
         else if (settings.mode() == TunnelMode.SECRET) {
@@ -175,7 +206,7 @@ public final class ClientRuntime implements ForwardManager {
             secret.setBaseAesKey(settings.keys().aesKey()); secret.setTokenKey(settings.keys().tokenKey());
             secret.setBasePasswayKey(settings.keys().aesKey()); config = secret;
         }
-        config.setClientServiceIp(settings.serverHost()); config.setClientServicePort(settings.handshakePort());
+        config.setClientServiceIp(server.host()); config.setClientServicePort(server.port());
         config.setClientId(settings.clientId()); config.setClientName(settings.clientName());
         config.setListenServerPort(mapping.remotePort()); config.setDestIpPort(mapping.targetHost(), mapping.localPort());
         config.setTryRecipientCount(0);

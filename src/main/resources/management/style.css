@@ -57,6 +57,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .button-quiet:hover:not(:disabled) { background: #f7f9fc; }
 .button-danger { background: #c83f45; color: #fff; }
 .button-danger:hover { background: #ac3037; }
+.server-connection { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 22px 0 0; padding: 15px 18px; border: 1px solid var(--border); border-radius: 7px; background: #fff; }
+.server-connection-info { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.server-connection-label { color: #667587; font-size: 12px; }
+.server-connection-info strong { color: #273e5c; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.server-connection-meta { color: #8190a0; font-size: 11px; overflow-wrap: anywhere; }
+.server-connection-meta.failed { color: #b44146; }
+.server-connection > button { flex-shrink: 0; }
+body[data-mode="client"] .server-connection + .hint { margin-top: 16px; }
 .hint { display: flex; align-items: center; gap: 11px; min-height: 44px; margin-top: 26px; padding: 11px 15px; border: 1px solid #dfe7f2; border-radius: 7px; background: #f0f5fd; color: #546985; font-size: 11px; line-height: 1.55; }
 .hint strong { color: #315d9e; font-size: 11px; white-space: nowrap; }
 
@@ -249,6 +257,8 @@ input[type="checkbox"] { accent-color: #2459c5; }
     .stat-card { padding: 18px; }
 }
 @media (max-width: 720px) {
+    .server-connection { align-items: flex-start; padding: 14px; gap: 12px; }
+    .server-connection-info { display: grid; gap: 6px; }
     .topbar { min-height: 0; padding: 0 16px; flex-wrap: wrap; gap: 0; }
     .topbar-main { width: 100%; height: 62px; justify-content: space-between; }
     .brand { gap: 9px; }

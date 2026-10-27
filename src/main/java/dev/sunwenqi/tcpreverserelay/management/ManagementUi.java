@@ -103,7 +103,7 @@ public final class ManagementUi implements AutoCloseable {
                 reply(exchange, 200, "管理密码已设置"); return;
             }
             if (!Set.of("/api/forwards", "/api/forwards/delete", "/api/forwards/batch", "/api/forwards/batch/preview",
-                    "/api/forwards/owner", "/api/health/settings", "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password", "/api/events").contains(path)) {
+                    "/api/connection/settings", "/api/forwards/owner", "/api/health/settings", "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password", "/api/events").contains(path)) {
                 reply(exchange, 404, "页面不存在"); return;
             }
             String supplied = exchange.getRequestHeaders().getFirst("Authorization");
@@ -141,6 +141,12 @@ public final class ManagementUi implements AutoCloseable {
             if (path.equals("/api/settings") && exchange.getRequestMethod().equals("GET")) {
                 json(exchange, Map.of("publicAccess", publicAccess, "canChangePassword", configFile != null && !externalPassword)); return;
             }
+            if (path.equals("/api/connection/settings") && exchange.getRequestMethod().equals("GET")) {
+                if (!client) { reply(exchange, 404, "仅客户端提供服务器连接设置"); return; }
+                var connection = forwards.connectionStatus();
+                if (connection == null) { reply(exchange, 409, "当前运行模块不支持服务器连接设置"); return; }
+                json(exchange, ForwardPayloads.connection(connection)); return;
+            }
             if (path.equals("/api/health/settings") && exchange.getRequestMethod().equals("GET")) {
                 if (!client) { reply(exchange, 404, "目标检查在客户端设置"); return; }
                 json(exchange, ForwardPayloads.healthSettings(forwards.healthSettings())); return;
@@ -158,6 +164,18 @@ public final class ManagementUi implements AutoCloseable {
                     record("INFO", "映射配置", operationPort, old == null ? "新增端口映射" : "修改端口映射",
                             (old == null ? "" : "原公网端口: " + old + "；") + (client ? "目标: " + fields.getOrDefault("targetHost", "127.0.0.1") + ":" + fields.get("target") : "服务端开放公网端口"));
                     json(exchange, mutationState());
+                }
+                case "/api/connection/settings" -> {
+                    if (!client) { reply(exchange, 404, "仅客户端提供服务器连接设置"); return; }
+                    exact(fields, "host", "port");
+                    var connection = new ServerConnection(fields.get("host"), AppSettings.parsePort(fields.get("port"), "握手端口"));
+                    boolean changed = forwards.configureConnection(connection); operationCompleted = true;
+                    if (changed) record("INFO", "服务器连接", null, "服务器连接设置已修改", TargetAddress.display(connection.host(), connection.port()));
+                    var result = state(); result.put("saved", true); result.put("changed", changed);
+                    var status = forwards.connectionStatus();
+                    result.put("message", !changed ? "连接配置已保存，服务器地址未变化" : status.enabledMappings() == 0
+                            ? "连接配置已保存，新增或启用映射后将自动连接" : "连接配置已保存，启用的映射正在重新注册，请查看注册状态");
+                    json(exchange, result);
                 }
                 case "/api/forwards/owner" -> {
                     if (client) { reply(exchange, 404, "端口归属在服务端设置"); return; }
@@ -257,9 +275,15 @@ public final class ManagementUi implements AutoCloseable {
         state.put("saved", true); state.put("pending", pending); return state;
     }
     private Map<String, Object> state() {
-        var result = new LinkedHashMap<String, Object>();
-        result.put("forwards", forwards.list().stream().map(ForwardPayloads::status).toList());
-        result.put("serverTime", System.currentTimeMillis()); result.put("role", client ? "client" : "server"); return result;
+        synchronized (forwards) {
+            var result = new LinkedHashMap<String, Object>();
+            result.put("forwards", forwards.list().stream().map(ForwardPayloads::status).toList());
+            if (client) {
+                var connection = forwards.connectionStatus();
+                if (connection != null) result.put("connection", ForwardPayloads.connection(connection));
+            }
+            result.put("serverTime", System.currentTimeMillis()); result.put("role", client ? "client" : "server"); return result;
+        }
     }
     private static boolean equal(String expected, String supplied) {
         return supplied != null && MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
