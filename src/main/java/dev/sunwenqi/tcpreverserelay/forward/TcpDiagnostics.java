@@ -1,25 +1,30 @@
 package dev.sunwenqi.tcpreverserelay.forward;
 
-import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
 import java.net.*;
 import java.util.concurrent.*;
 
+import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
+
 public final class TcpDiagnostics {
-    private static final ThreadPoolExecutor PROBES = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(16), task -> { Thread t = new Thread(task, "relay-diagnostic"); t.setDaemon(true); return t; });
+    private static final ThreadPoolExecutor PROBES = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(128), task -> { Thread t = new Thread(task, "relay-diagnostic"); t.setDaemon(true); return t; });
     private TcpDiagnostics() {}
 
     public static TargetProbeResult probe(String host, int port) {
+        return probe(host, port, 2000);
+    }
+
+    public static TargetProbeResult probe(String host, int port, int timeoutMillis) {
         long start = System.nanoTime();
         Future<TargetProbeResult> future = null;
         try {
             future = PROBES.submit(() -> {
                 try (Socket socket = new Socket()) {
-                    socket.connect(new InetSocketAddress(host, port), 2000);
+                    socket.connect(new InetSocketAddress(host, port), timeoutMillis);
                     return result(true, host, port, "TCP 连接成功", start);
                 } catch (Exception e) { return result(false, host, port, describe(e), start); }
             });
-            return future.get(2500, TimeUnit.MILLISECONDS);
+            return future.get(timeoutMillis + 250L, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             return result(false, host, port, "诊断任务繁忙，请稍后重试", start);
         } catch (Exception e) {

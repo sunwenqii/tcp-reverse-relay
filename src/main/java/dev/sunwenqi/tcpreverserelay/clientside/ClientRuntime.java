@@ -1,11 +1,15 @@
 package dev.sunwenqi.tcpreverserelay.clientside;
 
-import dev.sunwenqi.tcpreverserelay.clientside.config.*;
-import dev.sunwenqi.tcpreverserelay.config.*;
-import dev.sunwenqi.tcpreverserelay.forward.*;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
+
+import dev.sunwenqi.tcpreverserelay.clientside.config.*;
+import dev.sunwenqi.tcpreverserelay.config.*;
+import dev.sunwenqi.tcpreverserelay.forward.*;
+import dev.sunwenqi.tcpreverserelay.health.HealthMonitor;
+import dev.sunwenqi.tcpreverserelay.health.HealthSettings;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
 
 /** Owns saved mappings; registration runs asynchronously and is reported separately. */
 public final class ClientRuntime implements ForwardManager {
@@ -13,9 +17,14 @@ public final class ClientRuntime implements ForwardManager {
     private final AppSettings.Client settings;
     private final LinkedHashMap<Integer, AppSettings.Mapping> mappings = new LinkedHashMap<>();
     private final LinkedHashMap<Integer, ClientControlThread> controls = new LinkedHashMap<>();
+    private HealthSettings healthSettings;
+    private final HealthMonitor health;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, HealthSnapshot> healthUpdates = new java.util.concurrent.ConcurrentHashMap<>();
     private final LinkedHashSet<Integer> disabled = new LinkedHashSet<>();
 
-    public ClientRuntime(Path file, AppSettings.Client settings) { this.file = file; this.settings = settings; }
+    public ClientRuntime(Path file, AppSettings.Client settings) { this.file = file; this.settings = settings;
+        healthSettings = settings.health();
+        health = new HealthMonitor(healthSettings, healthUpdates::put); }
 
     public synchronized void start() {
         disabled.addAll(settings.disabledForwards());
@@ -27,6 +36,7 @@ public final class ClientRuntime implements ForwardManager {
                 control.startWithReconnect();
             }
         }
+        health.reconcile(mappings.values(), disabled);
     }
 
     @Override public synchronized void upsert(Integer oldPort, int remotePort, Integer localPort) throws IOException {
@@ -100,6 +110,8 @@ public final class ClientRuntime implements ForwardManager {
         mappings.clear(); mappings.putAll(next);
         controls.clear(); controls.putAll(nextControls);
         disabled.clear(); disabled.addAll(paused);
+        health.reconcile(mappings.values(), disabled);
+        healthUpdates.keySet().retainAll(controls.keySet());
     }
 
     @Override public synchronized List<ForwardStatus> list() {
@@ -115,7 +127,7 @@ public final class ClientRuntime implements ForwardManager {
                     control == null ? 0 : control.getConnectionCount(), mapping.targetHost(), enabled, state, error,
                     control == null ? 0 : control.getLastAttemptAt(), control == null ? 0 : control.getNextRetryAt(),
                     settings.clientId(), settings.clientName(), "", control == null ? 0 : control.getConnectedAt(),
-                    control == null ? 0 : control.getLastSeenAt()));
+                    control == null ? 0 : control.getLastSeenAt()).withMonitoring("", health.snapshot(mapping.remotePort())));
         }
         return result;
     }
@@ -135,12 +147,19 @@ public final class ClientRuntime implements ForwardManager {
         checks.add(new DiagnosticReport.Check("端口注册", !state.enabled() ? "skipped" : state.connected() ? "passed" : "pending",
                 !state.enabled() ? "映射已暂停" : state.connected() ? "服务端已接受此端口注册" : state.lastError().isEmpty() ? "等待注册" : state.lastError(), 0));
         var target = TcpDiagnostics.probe(mapping.targetHost(), mapping.localPort());
+        health.record(port, target);
         checks.add(new DiagnosticReport.Check("目标服务", target.isReachable() ? "passed" : "failed",
                 TargetAddress.display(mapping.targetHost(), mapping.localPort()) + " · " + target.getMessage(), target.getDurationMs()));
         return new DiagnosticReport(port, System.currentTimeMillis(), checks, DiagnosticReport.NOTE);
     }
 
+    @Override public synchronized HealthSettings healthSettings() { return healthSettings; }
+    @Override public synchronized void configureHealth(HealthSettings next) throws IOException {
+        ConfigFile.update(file, next.properties()); healthSettings = next; health.configure(next);
+    }
+
     public synchronized void close() {
+        health.close(); healthUpdates.clear();
         controls.values().forEach(ClientControlThread::cancell);
         controls.clear(); mappings.clear(); disabled.clear();
     }
@@ -160,6 +179,8 @@ public final class ClientRuntime implements ForwardManager {
         config.setClientId(settings.clientId()); config.setClientName(settings.clientName());
         config.setListenServerPort(mapping.remotePort()); config.setDestIpPort(mapping.targetHost(), mapping.localPort());
         config.setTryRecipientCount(0);
-        return new ClientControlThread(config);
+        var control = new ClientControlThread(config);
+        control.setHealthSupplier(() -> healthUpdates.get(mapping.remotePort()));
+        return control;
     }
 }

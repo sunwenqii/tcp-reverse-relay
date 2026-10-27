@@ -1,9 +1,10 @@
 package dev.sunwenqi.tcpreverserelay.clientside.adapter;
 
-import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
-import dev.sunwenqi.tcpreverserelay.model.interactive.ServerWaitModel;
-
 import java.time.LocalDateTime;
+
+import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ServerWaitModel;
 
 /**
  * <p>
@@ -25,6 +26,7 @@ public interface IClientAdapter<R, W> {
      * @throws Exception
      */
     boolean createControlChannel() throws Exception;
+    default void sendHealth(HealthSnapshot health) throws Exception {}
 
     /**
      * 请求建立隧道连接

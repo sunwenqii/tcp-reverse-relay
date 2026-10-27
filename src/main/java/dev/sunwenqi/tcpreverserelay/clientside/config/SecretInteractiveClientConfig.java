@@ -1,17 +1,15 @@
 package dev.sunwenqi.tcpreverserelay.clientside.config;
 
+import java.security.Key;
+
 import dev.sunwenqi.tcpreverserelay.channel.SecretInteractiveChannel;
 import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
 import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
 import dev.sunwenqi.tcpreverserelay.utils.AESUtil;
+
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.extern.slf4j.Slf4j;
-
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.security.Key;
 
 /**
  * <p>
@@ -37,19 +35,7 @@ public class SecretInteractiveClientConfig extends InteractiveClientConfig {
         channel.setTokenKey(this.tokenKey);
         channel.setAesKey(this.aesKey);
 
-        Socket socket = new Socket();
-        try {
-            socket.connect(new InetSocketAddress(this.getClientServiceIp(), this.getClientServicePort()), 5000);
-            channel.setSocket(socket);
-        } catch (IOException e) {
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-                // 连接失败后释放 socket。
-            }
-            log.debug("connect client service exception", e);
-            throw new RuntimeException(e);
-        }
+        connectService(channel);
         return channel;
     }
 

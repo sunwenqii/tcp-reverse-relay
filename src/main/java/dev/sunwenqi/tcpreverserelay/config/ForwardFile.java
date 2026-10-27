@@ -4,8 +4,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -20,6 +20,10 @@ public final class ForwardFile {
     }
 
     public static synchronized void save(Path path, List<String> entries, Set<Integer> disabled) throws IOException {
+        save(path, entries, disabled, null);
+    }
+
+    public static synchronized void save(Path path, List<String> entries, Set<Integer> disabled, java.util.Map<Integer, String> owners) throws IOException {
         String original = Files.readString(path, StandardCharsets.UTF_8);
         String[] lines = original.split("\\R", -1);
         int found = 0;
@@ -34,6 +38,7 @@ public final class ForwardFile {
         var values = new LinkedHashMap<String, String>();
         values.put("forwards", String.join(",", entries));
         if (disabled != null) values.put("disabled.forwards", String.join(",", PortRanges.compact(disabled)));
+        if (owners != null) values.put("port.owners", PortOwners.format(owners));
         ConfigFile.update(path, values);
     }
 }

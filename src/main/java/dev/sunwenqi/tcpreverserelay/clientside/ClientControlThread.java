@@ -1,22 +1,24 @@
 package dev.sunwenqi.tcpreverserelay.clientside;
 
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import dev.sunwenqi.tcpreverserelay.api.IBelongControl;
 import dev.sunwenqi.tcpreverserelay.api.socketpart.AbsSocketPart;
 import dev.sunwenqi.tcpreverserelay.clientside.adapter.IClientAdapter;
 import dev.sunwenqi.tcpreverserelay.clientside.config.IClientConfig;
 import dev.sunwenqi.tcpreverserelay.clientside.heart.IClientHeartThread;
+import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
+import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
+
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-
-import java.time.LocalDateTime;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.time.ZoneId;
-import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
-import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
 
 /**
  * <p>
@@ -33,6 +35,9 @@ public final class ClientControlThread implements Runnable, IBelongControl {
     private final AtomicBoolean attempting = new AtomicBoolean();
     private volatile boolean queued;
     private volatile boolean metadataDirty;
+    private java.util.function.Supplier<HealthSnapshot> healthSupplier;
+    public void setHealthSupplier(java.util.function.Supplier<HealthSnapshot> supplier) { healthSupplier = supplier; }
+    private volatile HealthSnapshot sentHealth;
     private volatile String lastError = "";
     private volatile String targetError = "";
     private volatile long lastAttemptAt;
@@ -87,6 +92,7 @@ public final class ClientControlThread implements Runnable, IBelongControl {
             lastError = "";
             targetError = "";
             metadataDirty = false;
+            sentHealth = null;
             this.start();
             reportedRegistrationError = "";
             RuntimeEvents.event("client", "INFO", reconnected ? "连接恢复" : "端口注册", getListenServerPort(),
@@ -236,7 +242,8 @@ public final class ClientControlThread implements Runnable, IBelongControl {
             }
         }
 
-        String[] array = this.socketPartMap.keySet().toArray(new String[0]);
+        String[] array;
+        synchronized (socketPartMap) { array = this.socketPartMap.keySet().toArray(new String[0]); }
 
         for (String key : array) {
             this.stopSocketPart(key);
@@ -285,6 +292,10 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      */
     public void sendHeartTest() throws Exception {
         if (metadataDirty) { this.clientAdapter.sendClientInfo(); metadataDirty = false; }
+        if (healthSupplier != null) {
+            var snapshot = healthSupplier.get();
+            if (snapshot != null && snapshot != sentHealth) { this.clientAdapter.sendHealth(snapshot); sentHealth = snapshot; }
+        }
         // 无需判空，空指针异常也是异常
         this.clientAdapter.sendHeartTest();
     }
@@ -304,8 +315,12 @@ public final class ClientControlThread implements Runnable, IBelongControl {
      * @param socketPartKey
      * @param socketPart
      */
-    public void putSocketPart(String socketPartKey, AbsSocketPart socketPart) {
-        this.socketPartMap.put(socketPartKey, socketPart);
+    public boolean putSocketPart(String socketPartKey, AbsSocketPart socketPart) {
+        synchronized (socketPartMap) {
+            if (!cancelled) { this.socketPartMap.put(socketPartKey, socketPart); return true; }
+        }
+        socketPart.cancel();
+        return false;
     }
 
     /**

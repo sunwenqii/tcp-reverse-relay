@@ -21,6 +21,7 @@ public enum InteractiveTypeEnum {
     SERVER_WAIT_CLIENT("需求客户端建立连接"),
     CLIENT_CONNECT("客户端建立通道连接"),
     CLIENT_CONTROL("客户端控制端口建立连接"),
+    CLIENT_HEALTH("目标连通性报告"),
     CLIENT_INFO("更新客户端注册信息"),
     TARGET_PROBE("诊断客户端目标端口"),
     TARGET_PROBE_RESULT("客户端目标诊断结果"),

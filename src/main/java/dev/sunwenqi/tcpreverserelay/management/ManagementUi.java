@@ -1,10 +1,5 @@
 package dev.sunwenqi.tcpreverserelay.management;
 
-import com.alibaba.fastjson.JSON;
-import com.sun.net.httpserver.*;
-import dev.sunwenqi.tcpreverserelay.config.*;
-import dev.sunwenqi.tcpreverserelay.forward.*;
-import dev.sunwenqi.tcpreverserelay.observability.EventJournal;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -12,6 +7,14 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
+
+import dev.sunwenqi.tcpreverserelay.config.*;
+import dev.sunwenqi.tcpreverserelay.forward.*;
+import dev.sunwenqi.tcpreverserelay.health.HealthSettings;
+import dev.sunwenqi.tcpreverserelay.observability.EventJournal;
+
+import com.alibaba.fastjson.JSON;
+import com.sun.net.httpserver.*;
 
 /** HTTP management for local or explicitly enabled remote access. */
 public final class ManagementUi implements AutoCloseable {
@@ -100,7 +103,7 @@ public final class ManagementUi implements AutoCloseable {
                 reply(exchange, 200, "管理密码已设置"); return;
             }
             if (!Set.of("/api/forwards", "/api/forwards/delete", "/api/forwards/batch", "/api/forwards/batch/preview",
-                    "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password", "/api/events").contains(path)) {
+                    "/api/forwards/owner", "/api/health/settings", "/api/forwards/diagnose", "/api/clients", "/api/settings", "/api/password", "/api/events").contains(path)) {
                 reply(exchange, 404, "页面不存在"); return;
             }
             String supplied = exchange.getRequestHeaders().getFirst("Authorization");
@@ -131,12 +134,16 @@ public final class ManagementUi implements AutoCloseable {
                     var value = new LinkedHashMap<String, Object>();
                     value.put("id", item.id()); value.put("name", item.name()); value.put("address", item.address()); value.put("version", item.version());
                     value.put("online", item.online()); value.put("connectedAt", item.connectedAt()); value.put("lastSeenAt", item.lastSeenAt());
-                    value.put("mappings", item.mappings().stream().map(ManagementUi::status).toList()); clients.add(value);
+                    value.put("mappings", item.mappings().stream().map(ForwardPayloads::status).toList()); clients.add(value);
                 }
                 json(exchange, Map.of("clients", clients, "note", "清单保留本次服务运行期间的客户端记录；重启后由客户端重新注册恢复。")); return;
             }
             if (path.equals("/api/settings") && exchange.getRequestMethod().equals("GET")) {
                 json(exchange, Map.of("publicAccess", publicAccess, "canChangePassword", configFile != null && !externalPassword)); return;
+            }
+            if (path.equals("/api/health/settings") && exchange.getRequestMethod().equals("GET")) {
+                if (!client) { reply(exchange, 404, "目标检查在客户端设置"); return; }
+                json(exchange, ForwardPayloads.healthSettings(forwards.healthSettings())); return;
             }
             requireMethod(exchange, "POST");
             Map<String, String> fields = form(exchange, path.contains("/batch") ? 262144 : 4096);
@@ -151,6 +158,25 @@ public final class ManagementUi implements AutoCloseable {
                     record("INFO", "映射配置", operationPort, old == null ? "新增端口映射" : "修改端口映射",
                             (old == null ? "" : "原公网端口: " + old + "；") + (client ? "目标: " + fields.getOrDefault("targetHost", "127.0.0.1") + ":" + fields.get("target") : "服务端开放公网端口"));
                     json(exchange, mutationState());
+                }
+                case "/api/forwards/owner" -> {
+                    if (client) { reply(exchange, 404, "端口归属在服务端设置"); return; }
+                    exact(fields, "port", "clientId"); operationPort = AppSettings.parsePort(fields.get("port"), "port");
+                    String owner = fields.get("clientId").trim();
+                    forwards.assignOwner(operationPort, owner); operationCompleted = true;
+                    record("INFO", "端口归属", operationPort, owner.isEmpty() ? "释放端口归属" : "调整端口归属", owner);
+                    json(exchange, Map.of("message", owner.isEmpty() ? "归属已释放，下一次注册将自动绑定" : "归属已保存，等待指定客户端注册"));
+                }
+                case "/api/health/settings" -> {
+                    if (!client) { reply(exchange, 404, "目标检查在客户端设置"); return; }
+                    exact(fields, "enabled", "intervalSeconds", "timeoutMillis", "failureThreshold");
+                    if (!Set.of("true", "false").contains(fields.get("enabled"))) throw new IllegalArgumentException("enabled 必须为 true 或 false");
+                    var next = new HealthSettings(Boolean.parseBoolean(fields.get("enabled")),
+                            Math.toIntExact(number(fields, "intervalSeconds", 15)), Math.toIntExact(number(fields, "timeoutMillis", 2000)),
+                            Math.toIntExact(number(fields, "failureThreshold", 2)));
+                    forwards.configureHealth(next); operationCompleted = true;
+                    record("INFO", "目标检查", null, "目标连通性检查设置已保存", "");
+                    json(exchange, ForwardPayloads.healthSettings(next));
                 }
                 case "/api/forwards/delete" -> {
                     exact(fields, "port"); operationPort = AppSettings.parsePort(fields.get("port"), "port");
@@ -232,16 +258,8 @@ public final class ManagementUi implements AutoCloseable {
     }
     private Map<String, Object> state() {
         var result = new LinkedHashMap<String, Object>();
-        result.put("forwards", forwards.list().stream().map(ManagementUi::status).toList());
+        result.put("forwards", forwards.list().stream().map(ForwardPayloads::status).toList());
         result.put("serverTime", System.currentTimeMillis()); result.put("role", client ? "client" : "server"); return result;
-    }
-    private static Map<String, Object> status(ForwardStatus item) {
-        var result = new LinkedHashMap<String, Object>();
-        result.put("port", item.port()); result.put("target", item.target()); result.put("targetHost", item.targetHost());
-        result.put("connected", item.connected()); result.put("connections", item.connections()); result.put("enabled", item.enabled());
-        result.put("state", item.state()); result.put("lastError", item.lastError()); result.put("lastAttemptAt", item.lastAttemptAt());
-        result.put("nextRetryAt", item.nextRetryAt()); result.put("clientId", item.clientId()); result.put("clientName", item.clientName());
-        result.put("clientAddress", item.clientAddress()); result.put("connectedAt", item.connectedAt()); result.put("lastSeenAt", item.lastSeenAt()); return result;
     }
     private static boolean equal(String expected, String supplied) {
         return supplied != null && MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));

@@ -43,7 +43,7 @@ class DynamicMappingIntegrationTest {
         Path clientFile = dir.resolve("client.properties");
         Files.writeString(serverFile, "mode=simple\nhandshake.port=" + handshake
                 + "\nadmin.port=" + admin + "\nforwards=" + forward + "\n");
-        Files.writeString(clientFile, "mode=simple\nserver.host=127.0.0.1\nhandshake.port=" + handshake
+        Files.writeString(clientFile, "health.enabled=false\nmode=simple\nserver.host=127.0.0.1\nhandshake.port=" + handshake
                 + "\nadmin.port=" + admin + "\nforwards=" + forward + ":" + target.getLocalPort() + "\n");
         ServerRuntime server = new ServerRuntime(serverFile, AppSettings.server(serverFile));
         ClientRuntime client = new ClientRuntime(clientFile, AppSettings.client(clientFile));

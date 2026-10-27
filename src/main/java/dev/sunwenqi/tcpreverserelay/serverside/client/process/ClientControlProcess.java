@@ -41,12 +41,15 @@ public class ClientControlProcess implements IProcess {
             return false;
         }
 
-        dev.sunwenqi.tcpreverserelay.serverside.listen.ClientRegistration.from(socketChannel.getSocket(), clientControlModel);
-        socketChannel.writeAndFlush(
-                InteractiveModel.of(recvInteractiveModel.getInteractiveSeq(), InteractiveTypeEnum.COMMON_REPLY,
-                        RelayResultModel.ofSuccess()));
-
-        serverListenThread.setControlSocket(socketChannel.getSocket(), clientControlModel);
+        try {
+            serverListenThread.acceptControl(socketChannel.getSocket(), clientControlModel, () -> socketChannel.writeAndFlush(
+                    InteractiveModel.of(recvInteractiveModel.getInteractiveSeq(), InteractiveTypeEnum.COMMON_REPLY,
+                            RelayResultModel.ofSuccess(java.util.Map.of("protocolVersion", 3)))));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            socketChannel.writeAndFlush(InteractiveModel.of(recvInteractiveModel.getInteractiveSeq(), InteractiveTypeEnum.COMMON_REPLY,
+                    new RelayResultModel(RelayResultEnum.FAIL.getCode(), e.getMessage(), null)));
+            return false;
+        }
         return true;
     }
 

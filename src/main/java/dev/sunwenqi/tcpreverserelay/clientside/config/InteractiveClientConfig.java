@@ -1,5 +1,11 @@
 package dev.sunwenqi.tcpreverserelay.clientside.config;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+
 import dev.sunwenqi.tcpreverserelay.api.socketpart.AbsSocketPart;
 import dev.sunwenqi.tcpreverserelay.api.socketpart.SimpleSocketPart;
 import dev.sunwenqi.tcpreverserelay.channel.InteractiveChannel;
@@ -13,15 +19,9 @@ import dev.sunwenqi.tcpreverserelay.clientside.handler.ServerWaitClientHandler;
 import dev.sunwenqi.tcpreverserelay.clientside.heart.ClientHeartThread;
 import dev.sunwenqi.tcpreverserelay.clientside.heart.IClientHeartThread;
 import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
+
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.nio.channels.spi.SelectorProvider;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 
 /**
  * <p>
@@ -107,27 +107,25 @@ public class InteractiveClientConfig implements IClientConfig<InteractiveModel, 
     @Override
     public SocketChannel<? extends InteractiveModel, ? super InteractiveModel> newClientChannel() {
         InteractiveChannel interactiveChannel = new InteractiveChannel();
-        java.nio.channels.SocketChannel openSocketChannel = null;
-        try {
-            openSocketChannel = SelectorProvider.provider().openSocketChannel();
-            Socket socket = openSocketChannel.socket();
-            socket.connect(new InetSocketAddress(this.getClientServiceIp(), this.getClientServicePort()), 5000);
-            interactiveChannel.setSocket(socket);
-        } catch (IOException e) {
-            if (openSocketChannel != null) {
-                try {
-                    openSocketChannel.close();
-                } catch (IOException ignored) {
-                    // 连接失败后释放通道。
-                }
-            }
-            log.debug("connect client service exception", e);
-            throw new RuntimeException(e);
-        }
+        connectService(interactiveChannel);
 
         interactiveChannel.setCharset(this.charset);
 
         return interactiveChannel;
+    }
+
+    /** Every service socket retains a channel, so the data connection can switch to nonblocking I/O. */
+    protected void connectService(SocketChannel<?, ?> destination) {
+        java.nio.channels.SocketChannel channel = null;
+        try {
+            channel = java.nio.channels.SocketChannel.open();
+            Socket socket = channel.socket();
+            socket.connect(new InetSocketAddress(getClientServiceIp(), getClientServicePort()), 5000);
+            destination.setSocket(socket);
+        } catch (IOException e) {
+            if (channel != null) try { channel.close(); } catch (IOException ignored) {}
+            throw new java.io.UncheckedIOException("无法连接服务端", e);
+        }
     }
 
     @Override

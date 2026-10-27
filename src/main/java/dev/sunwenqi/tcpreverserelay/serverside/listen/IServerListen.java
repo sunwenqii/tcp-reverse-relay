@@ -1,5 +1,7 @@
 package dev.sunwenqi.tcpreverserelay.serverside.listen;
 
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientHealthModel;
 import dev.sunwenqi.tcpreverserelay.serverside.listen.control.IControlSocket;
 
 /**
@@ -12,7 +14,9 @@ import dev.sunwenqi.tcpreverserelay.serverside.listen.control.IControlSocket;
  */
 public interface IServerListen {
     default void updateClientInfo(IControlSocket control,
-            dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel info) {}
+            ClientControlModel info) {}
+
+    default void updateHealth(IControlSocket control, ClientHealthModel report) {}
 
     /**
      * 格式化信息

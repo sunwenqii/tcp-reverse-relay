@@ -1,142 +1,46 @@
 package dev.sunwenqi.tcpreverserelay.api.socketpart;
 
+import java.io.IOException;
+import java.net.Socket;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import dev.sunwenqi.tcpreverserelay.api.IBelongControl;
-import dev.sunwenqi.tcpreverserelay.api.passway.SecretPassway;
-import dev.sunwenqi.tcpreverserelay.api.passway.SecretPassway.Mode;
 import dev.sunwenqi.tcpreverserelay.api.secret.ISecret;
-import dev.sunwenqi.tcpreverserelay.utils.Assert;
+import dev.sunwenqi.tcpreverserelay.nio.relay.EncryptedRelay;
+import dev.sunwenqi.tcpreverserelay.nio.relay.RelayReactor;
+
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.IOException;
-import java.net.Socket;
-import java.util.concurrent.CountDownLatch;
-
-/**
- * <p>
- * 加密-无加密socket对
- * </p>
- *
- * @author Sunwenqi
- * @since 2025-01-08 16:05:25
- */
 @Slf4j
-public class SecretSocketPart extends AbsSocketPart implements IBelongControl {
-
-    private final CountDownLatch cancelLatch = new CountDownLatch(2);
-    @Getter
-    @Setter
-    private ISecret secret;
-    private SecretPassway noToSecretPassway;
-    private SecretPassway secretToNoPassway;
-    @Getter
-    @Setter
-    private int streamCacheSize = 8192;
-
-    public SecretSocketPart(IBelongControl belongThread) {
-        super(belongThread);
-    }
-
-    @Override
-    public void cancel() {
-        if (this.canceled) {
-            return;
-        }
-        this.canceled = true;
-        this.isAlive = false;
-
-        log.debug("socketPart {} will cancel", this.socketPartKey);
-
-        SecretPassway noToSecretPassway;
-        if ((noToSecretPassway = this.noToSecretPassway) != null) {
-            this.noToSecretPassway = null;
-            noToSecretPassway.cancel();
-        }
-        SecretPassway secretToNoPassway;
-        if ((secretToNoPassway = this.secretToNoPassway) != null) {
-            this.secretToNoPassway = null;
-            secretToNoPassway.cancel();
-        }
-
-        Socket recvSocket;
-        if ((recvSocket = this.recvSocket) != null) {
-            this.recvSocket = null;
-            try {
-                recvSocket.close();
-            } catch (IOException e) {
-                log.debug("socketPart [{}] 监听端口 关闭异常", socketPartKey);
-            }
-        }
-
-        Socket sendSocket;
-        if ((sendSocket = this.sendSocket) != null) {
-            this.sendSocket = null;
-            try {
-                sendSocket.close();
-            } catch (IOException e) {
-                log.debug("socketPart [{}] 发送端口 关闭异常", socketPartKey);
-            }
-        }
-
-        log.debug("socketPart {} is cancelled", this.socketPartKey);
-    }
-
-    @Override
-    public boolean createPassWay() {
-        Assert.state(!this.canceled, "不得重启已退出的socketPart");
-
-        if (this.isAlive) {
-            return true;
-        }
-        this.isAlive = true;
-        try {
-            // 主要面向服务端-客户端过程加密
-            SecretPassway noToSecretPassway = this.noToSecretPassway = new SecretPassway();
-            noToSecretPassway.setBelongControl(this);
-            noToSecretPassway.setMode(Mode.noToSecret);
-            noToSecretPassway.setRecvSocket(this.recvSocket);
-            noToSecretPassway.setSendSocket(this.sendSocket);
-            noToSecretPassway.setStreamCacheSize(getStreamCacheSize());
-            noToSecretPassway.setSecret(this.secret);
-
-            SecretPassway secretToNoPassway = this.secretToNoPassway = new SecretPassway();
-            secretToNoPassway.setBelongControl(this);
-            secretToNoPassway.setMode(Mode.secretToNo);
-            secretToNoPassway.setRecvSocket(this.sendSocket);
-            secretToNoPassway.setSendSocket(this.recvSocket);
-            secretToNoPassway.setSecret(this.secret);
-
-            noToSecretPassway.start();
-            secretToNoPassway.start();
-        } catch (Exception e) {
-            log.error("socketPart [" + this.socketPartKey + "] 隧道建立异常", e);
-            this.stop();
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * 停止
-     */
+public final class SecretSocketPart extends AbsSocketPart {
+    @Getter @Setter private ISecret secret;
+    private final AtomicBoolean notified = new AtomicBoolean();
+    private volatile EncryptedRelay relay;
+    public SecretSocketPart(IBelongControl parent) { super(parent); }
     public void stop() {
-        this.cancel();
-
-        IBelongControl belong;
-        if ((belong = this.belongThread) != null) {
-            this.belongThread = null;
-            belong.stopSocketPart(this.socketPartKey);
-        }
+        cancel();
+        if (notified.compareAndSet(false, true) && belongThread != null) belongThread.stopSocketPart(socketPartKey);
     }
-
-    @Override
-    public void noticeStop() {
-        CountDownLatch cancelLatch = this.cancelLatch;
-        cancelLatch.countDown();
-        if (cancelLatch.getCount() <= 0) {
-            this.stop();
+    @Override public synchronized boolean createPassWay() {
+        if (canceled) throw new IllegalStateException("不得重启已退出的连接");
+        if (isAlive) return true;
+        if (recvSocket == null || sendSocket == null || recvSocket.getChannel() == null || sendSocket.getChannel() == null) {
+            log.warn("加密连接 {} 需要 SocketChannel", socketPartKey); stop(); return false;
         }
+        try {
+            relay = new EncryptedRelay(RelayReactor.shared(), recvSocket.getChannel(), sendSocket.getChannel(), secret, error -> {
+                if (error != null && !canceled) log.warn("加密连接 {} 已关闭: {}", socketPartKey, error.toString());
+                stop();
+            });
+            isAlive = true; relay.start(); return true;
+        } catch (RuntimeException e) { log.warn("无法建立加密连接 {}: {}", socketPartKey, e.toString()); stop(); return false; }
     }
-
+    @Override public synchronized void cancel() {
+        if (canceled) return;
+        canceled = true; isAlive = false;
+        if (relay != null) relay.close();
+        else for (Socket socket : new Socket[]{recvSocket, sendSocket}) if (socket != null) try { socket.close(); } catch (IOException ignored) {}
+    }
 }

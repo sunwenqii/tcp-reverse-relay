@@ -1,5 +1,12 @@
 package dev.sunwenqi.tcpreverserelay.clientside.adapter;
 
+import java.io.IOException;
+import java.net.Socket;
+import java.time.LocalDateTime;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Objects;
+
 import dev.sunwenqi.tcpreverserelay.api.socketpart.AbsSocketPart;
 import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
 import dev.sunwenqi.tcpreverserelay.clientside.ClientControlThread;
@@ -7,21 +14,17 @@ import dev.sunwenqi.tcpreverserelay.clientside.config.IClientConfig;
 import dev.sunwenqi.tcpreverserelay.clientside.handler.IClientHandler;
 import dev.sunwenqi.tcpreverserelay.executor.RelayExecutor;
 import dev.sunwenqi.tcpreverserelay.forward.TcpDiagnostics;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
 import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
 import dev.sunwenqi.tcpreverserelay.model.RelayResultModel;
 import dev.sunwenqi.tcpreverserelay.model.enumeration.InteractiveTypeEnum;
 import dev.sunwenqi.tcpreverserelay.model.enumeration.RelayResultEnum;
 import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientHealthModel;
 import dev.sunwenqi.tcpreverserelay.model.interactive.ServerWaitModel;
+
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-
-import java.io.IOException;
-import java.net.Socket;
-import java.time.LocalDateTime;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
 
 /**
  * <p>
@@ -53,6 +56,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
     /**
      * 记录服务器最后一次接收心跳的时间
      */
+    private volatile int serverProtocol;
     private LocalDateTime serverHeartLastRecvTime = LocalDateTime.now();
 
     public InteractiveSimpleClientAdapter(ClientControlThread clientControlThread,
@@ -109,6 +113,7 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
             if (StringUtils.equals(RelayResultEnum.SUCCESS.getCode(), javaObject.getRetCod())) {
                 socketChannel.getSocket().setSoTimeout(0);
                 this.socketChannel = socketChannel;
+                this.serverProtocol = javaObject.getData() instanceof java.util.Map<?, ?> data && data.get("protocolVersion") instanceof Number n ? n.intValue() : 0;
                 this.resetServerHeartLastRecvTime();
                 connected = true;
                 return true;
@@ -190,14 +195,14 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
         socketPart.setSendSocket(passwayClientChannel.getSocket());
         socketPart.setRecvSocket(destSocket);
         // 尝试打通隧道
+        if (!this.clientControlThread.putSocketPart(serverWaitModel.getSocketPartKey(), socketPart)) return false;
         boolean createPassWay = socketPart.createPassWay();
         if (!createPassWay) {
-            socketPart.cancel();
+            this.clientControlThread.stopSocketPart(serverWaitModel.getSocketPartKey());
             return false;
         }
 
         // 将socket伙伴放入客户端线程进行统一管理
-        this.clientControlThread.putSocketPart(serverWaitModel.getSocketPartKey(), socketPart);
         this.clientControlThread.recordTargetError("");
         return true;
     }
@@ -268,12 +273,18 @@ public class InteractiveSimpleClientAdapter implements IClientAdapter<Interactiv
         return this.socketChannel;
     }
 
+    @Override public void sendHealth(HealthSnapshot health) throws Exception {
+        var channel = this.socketChannel;
+        if (serverProtocol >= 3 && channel != null) channel.writeAndFlush(InteractiveModel.of(InteractiveTypeEnum.CLIENT_HEALTH,
+                ClientHealthModel.from(health)));
+    }
+
     private ClientControlModel registrationInfo() {
         ClientControlModel info = new ClientControlModel(this.config.getListenServerPort());
         info.setClientId(this.config.getClientId());
         info.setClientName(this.config.getClientName());
-        info.setClientVersion("1.2.0");
-        info.setProtocolVersion(2);
+        info.setClientVersion("1.3.0");
+        info.setProtocolVersion(3);
         synchronized (this.config) {
             info.setTargetHost(this.config.getDestIp());
             info.setTargetPort(this.config.getDestPort());

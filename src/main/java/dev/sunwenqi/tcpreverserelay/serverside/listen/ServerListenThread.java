@@ -1,19 +1,5 @@
 package dev.sunwenqi.tcpreverserelay.serverside.listen;
 
-import dev.sunwenqi.tcpreverserelay.api.IBelongControl;
-import dev.sunwenqi.tcpreverserelay.api.socketpart.AbsSocketPart;
-import dev.sunwenqi.tcpreverserelay.common.CommonFormat;
-import dev.sunwenqi.tcpreverserelay.config.ResourceLimits;
-import dev.sunwenqi.tcpreverserelay.executor.RelayExecutor;
-import dev.sunwenqi.tcpreverserelay.nio.INioProcessor;
-import dev.sunwenqi.tcpreverserelay.nio.NioHallows;
-import dev.sunwenqi.tcpreverserelay.serverside.listen.clear.IClearInvalidSocketPartThread;
-import dev.sunwenqi.tcpreverserelay.serverside.listen.config.IListenServerConfig;
-import dev.sunwenqi.tcpreverserelay.serverside.listen.control.IControlSocket;
-import dev.sunwenqi.tcpreverserelay.utils.Assert;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -23,9 +9,29 @@ import java.nio.channels.SocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
+
+import dev.sunwenqi.tcpreverserelay.api.IBelongControl;
+import dev.sunwenqi.tcpreverserelay.api.socketpart.AbsSocketPart;
+import dev.sunwenqi.tcpreverserelay.common.CommonFormat;
+import dev.sunwenqi.tcpreverserelay.config.AppSettings;
+import dev.sunwenqi.tcpreverserelay.config.ResourceLimits;
+import dev.sunwenqi.tcpreverserelay.config.TargetAddress;
+import dev.sunwenqi.tcpreverserelay.executor.RelayExecutor;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
 import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientHealthModel;
 import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
+import dev.sunwenqi.tcpreverserelay.nio.INioProcessor;
+import dev.sunwenqi.tcpreverserelay.nio.NioHallows;
 import dev.sunwenqi.tcpreverserelay.observability.RuntimeEvents;
+import dev.sunwenqi.tcpreverserelay.serverside.PortOwnershipRegistry;
+import dev.sunwenqi.tcpreverserelay.serverside.listen.clear.IClearInvalidSocketPartThread;
+import dev.sunwenqi.tcpreverserelay.serverside.listen.config.IListenServerConfig;
+import dev.sunwenqi.tcpreverserelay.serverside.listen.control.IControlSocket;
+import dev.sunwenqi.tcpreverserelay.utils.Assert;
+
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * <p>
@@ -64,7 +70,42 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
     private volatile boolean canceled = false;
     private volatile IControlSocket controlSocket;
     private volatile ClientRegistration registration;
+    private volatile PortOwnershipRegistry ownership;
+    private volatile HealthSnapshot health;
+    private volatile long healthReceivedAt;
     private volatile IClearInvalidSocketPartThread clearInvalidSocketPartThread;
+    public void setOwnership(PortOwnershipRegistry ownership) { this.ownership = ownership; }
+    @FunctionalInterface public interface RegistrationReply { void send() throws Exception; }
+
+    public synchronized void acceptControl(Socket socket, ClientControlModel info, RegistrationReply reply) throws Exception {
+        if (canceled) throw new IllegalArgumentException("端口监听已关闭");
+        var identity = ClientRegistration.from(socket, info);
+        if (ownership == null) throw new IllegalArgumentException("端口配置正在应用，请稍后重试");
+        try { ownership.claim(getListenPort(), identity.id()); }
+        catch (IOException e) { throw new IllegalStateException("无法保存端口归属，请检查服务端配置文件权限：" + e.getMessage(), e); }
+        reply.send();
+        installControl(socket, info);
+    }
+
+    public synchronized void assignOwner(String clientId) throws IOException {
+        ownership.assign(getListenPort(), clientId);
+        stopListen();
+        for (String key : List.copyOf(socketPartMap.keySet())) stopSocketPart(key);
+        registration = null; health = null;
+    }
+
+    @Override public synchronized void updateHealth(IControlSocket control, ClientHealthModel report) {
+        if (control != controlSocket || registration == null) return;
+        var next = report.snapshot();
+        if (!Objects.equals(registration.targetHost(), next.host()) || !Objects.equals(registration.targetPort(), next.port())) return;
+        health = next; healthReceivedAt = System.currentTimeMillis();
+    }
+
+    public HealthSnapshot healthSnapshot() {
+        var current = registration; var snapshot = health;
+        if (current == null || current.protocol() < 3) return HealthSnapshot.waiting("unsupported");
+        return snapshot == null ? HealthSnapshot.waiting("pending") : snapshot.staleAt(healthReceivedAt, System.currentTimeMillis());
+    }
 
     public ServerListenThread(IListenServerConfig config) throws Exception {
         this.config = config;
@@ -121,23 +162,26 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
             }
             return;
         }
+        IControlSocket acceptedControl = this.controlSocket;
         try {
             RelayExecutor.executeServerListenAccept(() -> {
                 String socketPartKey = null;
                 boolean inMap = false;
                 try {
-                    if (Objects.isNull(this.controlSocket)) {
-                        return;
+                    synchronized (this) {
+                        if (canceled || !isAlive || acceptedControl == null || acceptedControl != this.controlSocket) {
+                            return;
+                        }
+                        socketPartKey = CommonFormat.generateSocketPartKey(this.getListenPort());
+                        AbsSocketPart socketPart = this.config.newSocketPart(this);
+                        socketPart.setSocketPartKey(socketPartKey);
+                        socketPart.setRecvSocket(listenSocket);
+                        if (this.socketPartMap.putIfAbsent(socketPartKey, socketPart) != null) {
+                            return;
+                        }
+                        inMap = true;
                     }
-                    socketPartKey = CommonFormat.generateSocketPartKey(this.getListenPort());
-                    AbsSocketPart socketPart = this.config.newSocketPart(this);
-                    socketPart.setSocketPartKey(socketPartKey);
-                    socketPart.setRecvSocket(listenSocket);
-                    if (this.socketPartMap.putIfAbsent(socketPartKey, socketPart) != null) {
-                        return;
-                    }
-                    inMap = true;
-                    if (!this.sendClientWait(socketPartKey)) {
+                    if (!this.sendClientWait(acceptedControl, socketPartKey)) {
                         this.stopSocketPart(socketPartKey);
                     }
                 } catch (Exception e) {
@@ -174,11 +218,10 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
      * @author Sunwenqi
      * @since 2024-07-11 15:45:14
      */
-    private boolean sendClientWait(String socketPartKey) {
+    private boolean sendClientWait(IControlSocket controlSocket, String socketPartKey) {
         log.debug("告知新连接 sendClientWait[{}]", socketPartKey);
         boolean sendClientWait;
 
-        IControlSocket controlSocket = this.controlSocket;
         if (controlSocket == null) {
             return false;
         }
@@ -194,7 +237,7 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
             log.warn("告知新连接 sendClientWait[" + socketPartKey + "] 失败");
             if (!controlSocket.isValid()) {
                 // 保证control为置空状态
-                this.stopListen();
+                this.controlCloseNotice(controlSocket);
             }
             return false;
         }
@@ -403,11 +446,7 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
      *
      * @param socket
      */
-    public synchronized void setControlSocket(Socket socket) {
-        setControlSocket(socket, new ClientControlModel(this.getListenPort()));
-    }
-
-    public synchronized void setControlSocket(Socket socket, ClientControlModel info) {
+    private void installControl(Socket socket, ClientControlModel info) {
         ClientRegistration nextRegistration = ClientRegistration.from(socket, info);
         log.info("setControlSocket[{}]", this.getListenPort());
 
@@ -423,8 +462,10 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
             }
         }
 
+        for (String key : List.copyOf(socketPartMap.keySet())) stopSocketPart(key);
         controlSocketNew.setServerListen(this);
         this.registration = nextRegistration;
+        this.health = null;
         this.controlSocket = controlSocketNew;
         controlSocketNew.startRecv();
         this.start();
@@ -438,11 +479,12 @@ public final class ServerListenThread implements Runnable, INioProcessor, IBelon
         // Source address and connection timestamps remain owned by the server.
         ClientRegistration update = new ClientRegistration(info.getClientId(), info.getClientName(), registration.address(),
                 info.getClientVersion(), info.getProtocolVersion(),
-                dev.sunwenqi.tcpreverserelay.config.TargetAddress.validate(info.getTargetHost()),
-                dev.sunwenqi.tcpreverserelay.config.AppSettings.parsePort(String.valueOf(info.getTargetPort()), "目标端口"),
+                TargetAddress.validate(info.getTargetHost()),
+                AppSettings.parsePort(String.valueOf(info.getTargetPort()), "目标端口"),
                 registration.connectedAt(), System.currentTimeMillis());
         if (update.name() == null || update.name().isBlank() || update.name().length() > 64
                 || update.name().chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("无效的客户端名称");
+        if (!Objects.equals(registration.targetHost(), update.targetHost()) || !Objects.equals(registration.targetPort(), update.targetPort())) health = null;
         registration = registration.updated(update);
     }
 

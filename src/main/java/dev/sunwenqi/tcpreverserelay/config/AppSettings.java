@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
+import dev.sunwenqi.tcpreverserelay.health.HealthSettings;
+
 /**
  * Read and validate the two local configuration files.
  */
@@ -23,15 +25,22 @@ public final class AppSettings {
     }
 
     public record Server(TunnelMode mode, int handshakePort, int adminPort, List<Integer> forwards,
-                         SecurityConfig.Keys keys, Set<Integer> disabledForwards) {
+                         SecurityConfig.Keys keys, Set<Integer> disabledForwards, Map<Integer, String> portOwners) {
+        public Server(TunnelMode mode, int handshakePort, int adminPort, List<Integer> forwards, SecurityConfig.Keys keys, Set<Integer> disabled) {
+            this(mode, handshakePort, adminPort, forwards, keys, disabled, Map.of());
+        }
         public Server(TunnelMode mode, int handshakePort, int adminPort, List<Integer> forwards, SecurityConfig.Keys keys) {
-            this(mode, handshakePort, adminPort, forwards, keys, Set.of());
+            this(mode, handshakePort, adminPort, forwards, keys, Set.of(), Map.of());
         }
     }
 
     public record Client(TunnelMode mode, String serverHost, int handshakePort, int adminPort,
                          List<Mapping> forwards, SecurityConfig.Keys keys, String clientId, String clientName,
-                         Set<Integer> disabledForwards) {
+                         Set<Integer> disabledForwards, HealthSettings health) {
+        public Client(TunnelMode mode, String host, int handshakePort, int adminPort, List<Mapping> forwards, SecurityConfig.Keys keys,
+                      String id, String name, Set<Integer> disabled) {
+            this(mode, host, handshakePort, adminPort, forwards, keys, id, name, disabled, HealthSettings.DEFAULT);
+        }
         public Client(TunnelMode mode, String serverHost, int handshakePort, int adminPort, List<Mapping> forwards,
                       SecurityConfig.Keys keys) {
             this(mode, serverHost, handshakePort, adminPort, forwards, keys, UUID.randomUUID().toString(), "client", Set.of());
@@ -39,7 +48,7 @@ public final class AppSettings {
     }
 
     public static Server server(Path path) throws IOException {
-        Properties p = read(path, Set.of("mode", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
+        Properties p = read(path, Set.of("mode", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "port.owners", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
         AdminSettingsFile.publicAccess(path);
         TunnelMode mode = mode(p);
         int handshake = port(p, "handshake.port");
@@ -48,11 +57,11 @@ public final class AppSettings {
             throw new IllegalArgumentException("handshake.port 与 admin.port 不能相同");
         }
         List<Integer> forwards = PortRanges.parse(p.getProperty("forwards", ""), handshake, admin);
-        return new Server(mode, handshake, admin, forwards, keys(p), disabled(p, new HashSet<>(forwards)));
+        return new Server(mode, handshake, admin, forwards, keys(p), disabled(p, new HashSet<>(forwards)), PortOwners.parse(p.getProperty("port.owners", ""), forwards));
     }
 
     public static Client client(Path path) throws IOException {
-        Properties p = read(path, Set.of("mode", "server.host", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "client.id", "client.name", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
+        Properties p = read(path, Set.of("mode", "server.host", "handshake.port", "admin.port", "admin.public", "forwards", "disabled.forwards", "client.id", "client.name", "health.enabled", "health.interval.seconds", "health.timeout.millis", "health.failure.threshold", "AES_KEY", "TOKEN_KEY", "ADMIN_TOKEN"));
         AdminSettingsFile.publicAccess(path);
         TunnelMode mode = mode(p);
         String host = required(p, "server.host");
@@ -66,7 +75,7 @@ public final class AppSettings {
         forwards.forEach(mapping -> ports.add(mapping.remotePort()));
         Set<Integer> disabled = disabled(p, ports);
         ClientIdentity identity = ClientIdentity.resolve(path, p);
-        return new Client(mode, host, handshake, admin, forwards, keys(p), identity.id(), identity.name(), disabled);
+        return new Client(mode, host, handshake, admin, forwards, keys(p), identity.id(), identity.name(), disabled, HealthSettings.from(p));
     }
 
     public static List<Mapping> parseMappings(String value, int admin) {

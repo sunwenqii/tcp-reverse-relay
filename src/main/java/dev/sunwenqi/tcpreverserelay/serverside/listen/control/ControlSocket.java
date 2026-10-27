@@ -1,22 +1,24 @@
 package dev.sunwenqi.tcpreverserelay.serverside.listen.control;
 
-import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
-import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
-import dev.sunwenqi.tcpreverserelay.model.enumeration.InteractiveTypeEnum;
-import dev.sunwenqi.tcpreverserelay.model.enumeration.RelayResultEnum;
-import dev.sunwenqi.tcpreverserelay.model.interactive.ServerWaitModel;
-import dev.sunwenqi.tcpreverserelay.serverside.listen.IServerListen;
-import dev.sunwenqi.tcpreverserelay.serverside.listen.recv.IRecvHandler;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.net.Socket;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
+
+import dev.sunwenqi.tcpreverserelay.channel.SocketChannel;
+import dev.sunwenqi.tcpreverserelay.model.InteractiveModel;
+import dev.sunwenqi.tcpreverserelay.model.enumeration.InteractiveTypeEnum;
+import dev.sunwenqi.tcpreverserelay.model.enumeration.RelayResultEnum;
 import dev.sunwenqi.tcpreverserelay.model.interactive.ClientControlModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ClientHealthModel;
+import dev.sunwenqi.tcpreverserelay.model.interactive.ServerWaitModel;
 import dev.sunwenqi.tcpreverserelay.model.interactive.TargetProbeResult;
+import dev.sunwenqi.tcpreverserelay.serverside.listen.IServerListen;
+import dev.sunwenqi.tcpreverserelay.serverside.listen.recv.IRecvHandler;
+
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * <p>
@@ -146,6 +148,10 @@ public class ControlSocket implements IControlSocket, Runnable {
                 lastActivityAt = System.currentTimeMillis();
                 if (InteractiveTypeEnum.CLIENT_INFO.name().equals(interactiveModel.getInteractiveType())) {
                     serverListen.updateClientInfo(this, interactiveModel.getData().toJavaObject(ClientControlModel.class));
+                    continue;
+                }
+                if (InteractiveTypeEnum.CLIENT_HEALTH.name().equals(interactiveModel.getInteractiveType())) {
+                    serverListen.updateHealth(this, interactiveModel.getData().toJavaObject(ClientHealthModel.class));
                     continue;
                 }
                 CompletableFuture<TargetProbeResult> probe = interactiveModel.getInteractiveSeq() == null

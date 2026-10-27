@@ -7,6 +7,7 @@
     let stale = false, lastSuccess = 0, generation = 0, loading = null, canChangePassword = false;
     let toastTimer, batchAction = 'add', previewKey = '', diagnosticPort = null, diagnosticGeneration = 0, finishConfirmation = null;
     const selected = new Set(), busy = new Set();
+    let ownerPort = null;
     const journalUI = window.RelayJournal.create({request, handleError, element, cell, clock, loggedIn: () => Boolean(token)});
 
     function element(tag, text = '', className = '') {
@@ -26,7 +27,7 @@
     function writable() { return Boolean(token) && !stale; }
     function setBusy(id, enabled) { enabled ? busy.add(id) : busy.delete(id); syncControls(); }
     function syncControls() {
-        for (const id of ['addButton', 'batchButton', 'publicSwitch', 'enableSelected', 'disableSelected', 'deleteSelected', 'saveButton', 'savePassword'])
+        for (const id of ['addButton', 'batchButton', 'publicSwitch', 'enableSelected', 'disableSelected', 'deleteSelected', 'saveButton', 'savePassword', 'healthButton', 'saveHealth', 'saveOwner'])
             $(id).disabled = !writable() || busy.has(id);
         $('applyBatch').disabled = !writable() || busy.has('applyBatch') || !previewKey || previewKey !== batchAction + '\n' + $('batchEntries').value;
         for (const id of ['refreshButton', 'refreshClients', 'retryButton']) $(id).disabled = !token || Boolean(loading);
@@ -152,11 +153,11 @@
         const query = $('searchInput').value.trim().toLowerCase();
         const filter = $('statusFilter').value;
         return forwards.filter(item => {
-            const text = [item.port, item.target, item.targetHost, item.clientName, item.clientId].filter(value => value != null).join(' ').toLowerCase();
+            const text = [item.port, item.target, item.targetHost, item.clientName, item.clientId, item.ownerId].filter(value => value != null).join(' ').toLowerCase();
             const enabled = item.enabled !== false;
             return (!query || text.includes(query)) && (filter === 'all' || filter === 'paused' && !enabled
                 || filter === 'connected' && enabled && item.connected || filter === 'waiting' && enabled && !item.connected
-                || filter === 'error' && item.state === 'error');
+                || filter === 'error' && item.state === 'error' || filter === 'unhealthy' && ['down', 'suspect', 'stale'].includes(item.health?.state));
         });
     }
     function render() {
@@ -174,7 +175,7 @@
         const rows = shown.slice((page - 1) * 20, page * 20), tbody = $('mappingRows');
         tbody.replaceChildren();
         if (!rows.length) {
-            const row = element('tr'), td = cell(row, ''); td.colSpan = client ? 5 : 6;
+            const row = element('tr'), td = cell(row, ''); td.colSpan = client ? 6 : 7;
             const box = element('div', '', 'empty');
             box.append(element('strong', token ? (forwards.length ? '没有匹配的映射' : '还没有端口映射') : '请先登录管理页'),
                 element('p', forwards.length ? '调整搜索条件或状态筛选。' : '使用新增映射或批量添加开始配置。'));
@@ -188,16 +189,27 @@
             cell(row, checkbox, 'checkbox-cell');
             cell(row, element('span', String(item.port), 'port-main')).append(element('span', 'TCP · 公网', 'port-sub'));
             const target = cell(row, item.target != null ? address(item.targetHost || '127.0.0.1', item.target) : '等待客户端上报', item.target == null ? 'target-muted' : 'target-main');
-            if (!client && item.clientName) target.append(element('span', item.clientName, 'port-sub'));
+            if (!client && (item.clientName || item.ownerId)) {
+                const owner = element('span', item.clientName || '已绑定客户端', 'port-sub');
+                owner.title = '归属：' + (item.ownerId || '首次注册后绑定'); target.append(owner);
+            }
             const [label, className] = status(item), state = element('span', label, 'status ' + className);
             state.title = item.connected ? '客户端控制连接已建立；不代表目标应用健康状态' : item.enabled === false ? '配置已保留，恢复后重新注册' : '等待控制连接建立或恢复';
             const statusCell = cell(row, state);
             if (item.lastError) { const detail = element('span', item.lastError, 'status-detail'); detail.title = item.lastError; statusCell.append(detail); }
             else if (client && item.enabled !== false && !item.connected) statusCell.append(element('span', '自动重试中', 'port-sub'));
+            const health = item.health || {state: 'pending'};
+            const healthLabels = {up: ['可达', 'connected'], down: ['不可达', 'failed'], suspect: ['待确认', 'waiting'], pending: ['待检测', 'waiting'],
+                disabled: ['未启用', 'paused'], paused: ['已暂停', 'paused'], offline: ['无报告', 'paused'], stale: ['已过期', 'waiting'], unsupported: ['待升级', 'paused']};
+            const [healthText, healthClass] = healthLabels[health.state] || ['待检测', 'waiting'];
+            const healthCell = cell(row, element('span', healthText, 'status ' + healthClass));
+            healthCell.title = [health.message, health.checkedAt ? clock(health.checkedAt) + ' · ' + health.durationMs + ' ms' : '尚无检查结果'].filter(Boolean).join(' · ');
+            if (health.checkedAt) healthCell.append(element('span', health.durationMs + ' ms', 'port-sub'));
             if (!client) { const count = cell(row, String(item.connections || 0), 'connection-count'); count.title = '含等待接通的外部 TCP 连接'; }
             const actions = element('div', '', 'row-actions');
             for (const [text, action, css] of [
                 ['诊断', () => openDiagnostic(item.port), ''], ['日志', () => { showView('events'); journalUI.forPort(item.port); }, ''], ['编辑', () => openDrawer(item), 'write-action'],
+                ...(!client ? [['归属', () => openOwner(item), 'write-action']] : []),
                 [item.enabled === false ? '启用' : '暂停', () => openBatch(item.enabled === false ? 'enable' : 'disable', [item.port]), 'write-action'],
                 ['删除', () => deleteForward(item), 'delete write-action']]) {
                 const button = element('button', text, css); button.type = 'button'; button.disabled = !writable();
@@ -332,7 +344,7 @@
         $('tokenInput').value = ''; $('confirmInput').value = ''; $('connectionBanner').hidden = true;
         $('mainContent').classList.remove('stale'); closeDrawer();
         if (finishConfirmation) finishConfirmation(false);
-        for (const id of ['diagnosticDialog', 'batchDialog', 'passwordDialog']) if ($(id).open) $(id).close();
+        for (const id of ['diagnosticDialog', 'batchDialog', 'passwordDialog', 'ownerDialog', 'healthDialog']) if ($(id).open) $(id).close();
         $('passwordForm').reset(); previewKey = ''; showView('mappings'); render(); renderClients();
         for (const id of ['totalCount', 'connectedCount', 'waitingCount', 'activityCount']) $(id).textContent = '—';
         $('updatedAt').textContent = '尚未读取'; $('tokenInput').focus();
@@ -406,6 +418,38 @@
             lock(); $('gateError').textContent = '密码已修改，请使用新密码登录';
         } catch (error) { if (error.status === 0) markStale(error); $('passwordError').textContent = error.message; }
         finally { setBusy('savePassword', false); }
+    });
+    function openOwner(item) {
+        ownerPort = item.port; $('ownerPortLabel').textContent = '公网端口 ' + item.port;
+        $('ownerInput').value = item.ownerId || ''; $('ownerError').textContent = '';
+        $('ownerClients').replaceChildren(...clients.map(entry => { const option = element('option'); option.value = entry.id; option.label = entry.name; return option; }));
+        $('ownerDialog').showModal(); $('ownerInput').focus();
+    }
+    $('ownerForm').addEventListener('submit', async event => {
+        event.preventDefault(); if (!writable() || busy.has('saveOwner')) return;
+        if (!await confirmOperation('保存端口归属？', '端口 ' + ownerPort + ' 的现有连接将关闭。', '保存归属') || !writable()) return;
+        setBusy('saveOwner', true); $('ownerError').textContent = '';
+        try { const result = await request('/api/forwards/owner', {port: ownerPort, clientId: $('ownerInput').value.trim()}); $('ownerDialog').close(); await load(); notice(result.message); }
+        catch (error) { handleError(error, 'ownerError'); } finally { setBusy('saveOwner', false); }
+    });
+    $('healthButton').addEventListener('click', async () => {
+        const epoch = generation;
+        try {
+            const result = await request('/api/health/settings');
+            if (epoch !== generation || !token) return;
+            $('healthEnabled').checked = result.enabled; $('healthInterval').value = result.intervalSeconds;
+            $('healthTimeout').value = result.timeoutMillis; $('healthThreshold').value = result.failureThreshold;
+            $('healthError').textContent = ''; $('healthDialog').showModal();
+        } catch (error) { handleError(error); }
+    });
+    $('healthForm').addEventListener('submit', async event => {
+        event.preventDefault(); if (!writable() || busy.has('saveHealth')) return;
+        setBusy('saveHealth', true); $('healthError').textContent = '';
+        try {
+            await request('/api/health/settings', {enabled: String($('healthEnabled').checked), intervalSeconds: $('healthInterval').value,
+                timeoutMillis: $('healthTimeout').value, failureThreshold: $('healthThreshold').value});
+            $('healthDialog').close(); await load(); notice('检查设置已保存并生效');
+        } catch (error) { handleError(error, 'healthError'); } finally { setBusy('saveHealth', false); }
     });
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && !$('drawer').hidden) closeDrawer();

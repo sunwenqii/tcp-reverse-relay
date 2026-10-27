@@ -51,7 +51,7 @@ class ManagementFeaturesIntegrationTest {
                 var info = server.clients().get(0);
                 assertEquals("test-client", info.id()); assertEquals("Office PC", info.name());
                 assertEquals("localhost", info.mappings().get(0).targetHost());
-                assertEquals("1.2.0", info.version());
+                assertEquals("1.3.0", info.version());
                 try (var ui = new ManagementUi(admin, false, server, serverFile)) {
                     ui.start();
                     var http = HttpClient.newHttpClient();

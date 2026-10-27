@@ -1,14 +1,16 @@
 package dev.sunwenqi.tcpreverserelay.serverside;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.*;
+
 import dev.sunwenqi.tcpreverserelay.config.*;
 import dev.sunwenqi.tcpreverserelay.forward.*;
+import dev.sunwenqi.tcpreverserelay.health.HealthSnapshot;
 import dev.sunwenqi.tcpreverserelay.serverside.client.ClientServiceThread;
 import dev.sunwenqi.tcpreverserelay.serverside.client.config.*;
 import dev.sunwenqi.tcpreverserelay.serverside.listen.*;
 import dev.sunwenqi.tcpreverserelay.serverside.listen.config.*;
-import java.io.IOException;
-import java.nio.file.Path;
-import java.util.*;
 
 /** Binds candidate ports before committing a single configuration update. */
 public final class ServerRuntime implements ForwardManager {
@@ -18,8 +20,10 @@ public final class ServerRuntime implements ForwardManager {
     private final LinkedHashSet<Integer> disabled = new LinkedHashSet<>();
     private final LinkedHashMap<String, ClientInfo> knownClients = new LinkedHashMap<>();
     private ClientServiceThread service;
+    private final PortOwnershipRegistry ownership;
 
-    public ServerRuntime(Path file, AppSettings.Server settings) { this.file = file; this.settings = settings; }
+    public ServerRuntime(Path file, AppSettings.Server settings) { this.file = file; this.settings = settings;
+        this.ownership = new PortOwnershipRegistry(file, settings.forwards(), settings.disabledForwards(), settings.portOwners()); }
 
     public synchronized void start() throws Exception {
         try {
@@ -49,7 +53,7 @@ public final class ServerRuntime implements ForwardManager {
         if (oldPort != null) next.remove(oldPort);
         next.add(newPort);
         if (keepPaused) paused.add(newPort);
-        apply(next, paused);
+        apply(next, paused, oldPort, newPort);
     }
 
     @Override public synchronized void upsert(Integer oldPort, int port, Integer target) throws IOException {
@@ -90,19 +94,27 @@ public final class ServerRuntime implements ForwardManager {
     }
 
     private void apply(LinkedHashSet<Integer> next, LinkedHashSet<Integer> paused) throws IOException {
+        apply(next, paused, null, null);
+    }
+
+    private void apply(LinkedHashSet<Integer> next, LinkedHashSet<Integer> paused, Integer oldPort, Integer newPort) throws IOException {
         PortRanges.requireWithinLimit(next);
         clients();
         List<Integer> created = new ArrayList<>();
         try {
-            for (int port : next) {
-                validatePort(port);
-                if (!paused.contains(port)) {
-                    var listener = ListenServerControl.get(port);
-                    if (listener != null && listener.isCanceled()) { ListenServerControl.remove(port); listener = null; }
-                    if (listener == null) { bind(port); created.add(port); }
+            synchronized (ownership) {
+                var nextOwners = ownership.nextOwners(next, oldPort, newPort);
+                for (int port : next) {
+                    validatePort(port);
+                    if (!paused.contains(port)) {
+                        var listener = ListenServerControl.get(port);
+                        if (listener != null && listener.isCanceled()) { ListenServerControl.remove(port); listener = null; }
+                        if (listener == null) { bind(port); created.add(port); }
+                    }
                 }
+                ForwardFile.save(file, PortRanges.compact(next), paused, nextOwners);
+                ownership.publish(next, paused, nextOwners);
             }
-            ForwardFile.save(file, PortRanges.compact(next), paused);
         } catch (IOException | RuntimeException e) {
             created.forEach(ListenServerControl::remove);
             throw e;
@@ -126,7 +138,9 @@ public final class ServerRuntime implements ForwardManager {
                     failed ? "监听已停止，请检查端口并重新启用" : "", 0, 0,
                     registration == null ? "" : registration.id(), registration == null ? "" : registration.name(),
                     registration == null ? "" : registration.address(), registration == null ? 0 : registration.connectedAt(),
-                    registration == null ? 0 : registration.lastSeenAt()));
+                    registration == null ? 0 : registration.lastSeenAt()).withMonitoring(ownership.owner(port),
+                    !enabled ? HealthSnapshot.waiting("paused")
+                    : !online ? HealthSnapshot.waiting("offline") : listener.healthSnapshot()));
         }
         return result;
     }
@@ -178,6 +192,12 @@ public final class ServerRuntime implements ForwardManager {
         return new DiagnosticReport(port, System.currentTimeMillis(), checks, DiagnosticReport.NOTE);
     }
 
+    @Override public synchronized void assignOwner(int port, String clientId) throws IOException {
+        if (!ports.contains(port)) throw new IllegalArgumentException("端口不存在: " + port);
+        var listener = ListenServerControl.get(port);
+        if (listener != null) listener.assignOwner(clientId); else ownership.assign(port, clientId);
+    }
+
     public synchronized void close() {
         for (int port : ports) ListenServerControl.remove(port);
         ports.clear(); disabled.clear(); knownClients.clear();
@@ -201,7 +221,9 @@ public final class ServerRuntime implements ForwardManager {
             secret.setBaseAesKey(settings.keys().aesKey()); secret.setTokenKey(settings.keys().tokenKey());
             secret.setBasePasswayKey(settings.keys().aesKey()); config = secret;
         }
-        if (ListenServerControl.createNewListenServer(config) == null)
+        var listener = ListenServerControl.createNewListenServer(config);
+        if (listener == null)
             throw new IOException("无法监听端口 " + port + "，可能已被其他程序占用或没有权限");
+        listener.setOwnership(ownership);
     }
 }
